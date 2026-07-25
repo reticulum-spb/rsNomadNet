@@ -109,6 +109,26 @@ async function handleLocalRrcCommand(text) {
     $("#rrc-connect").click();
     return true;
   }
+  if (command === "/list") {
+    await loadRrcRooms();
+    return true;
+  }
+  if (command === "/who" || command === "/names") {
+    const room = (args[0] || state.rrc.activeRoom || "").replace(/^#/, "").toLowerCase();
+    const hub = state.rrc.hubs.get(state.rrc.activeHub);
+    if (!room || !hub?.rooms.includes(room)) {
+      $("#rrc-error").textContent = "usage: /who [joined-room]";
+      return true;
+    }
+    if (room !== state.rrc.activeRoom) {
+      state.rrc.activeRoom = room;
+      markRrcRoomRead(state.rrc.activeHub, room);
+      renderRrc();
+      await loadRrcHistory();
+    }
+    await loadRrcUsers();
+    return true;
+  }
   if (command === "/part" || command === "/leave") {
     const room = (args[0] || state.rrc.activeRoom || "").replace(/^#/, "").toLowerCase();
     const hub = state.rrc.hubs.get(state.rrc.activeHub);
@@ -969,7 +989,7 @@ $("#rrc-compose").addEventListener("submit", async (event) => {
       room: state.rrc.activeRoom,
       source_hash: "",
       nick: "rsNomadNet",
-      body: "Client commands: /connect [hub], /ping, /join <room> [key] (/j), /part [room] (/leave), /me <text>, /nick [name], /clear, /disconnect (/quit). Server command help follows.",
+      body: "Client commands: /connect [hub], /ping, /list, /who [room] (/names), /join <room> [key] (/j), /part [room] (/leave), /me <text>, /nick [name], /clear, /disconnect (/quit). Server command help follows.",
       timestamp_ms: Date.now(),
       kind: "notice",
     });

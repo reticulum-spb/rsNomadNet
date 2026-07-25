@@ -155,7 +155,19 @@
             <div class="rrc-list-status" id="rrc-list-status"></div>
             <div class="rrc-room-tools" id="rrc-room-tools"></div>
             <div class="rrc-messages" id="rrc-messages"></div>
-            <form class="rrc-compose" id="rrc-compose"><input id="rrc-body" placeholder="Message or /help" autocomplete="off"><button class="primary">Send</button></form>
+            <form class="rrc-compose" id="rrc-compose"><input id="rrc-body" list="rrc-command-list" placeholder="Message or /help" autocomplete="off"><button class="primary">Send</button></form>
+            <datalist id="rrc-command-list">
+              <option value="/help"></option>
+              <option value="/ping"></option>
+              <option value="/list"></option>
+              <option value="/who"></option>
+              <option value="/join "></option>
+              <option value="/part"></option>
+              <option value="/me "></option>
+              <option value="/nick "></option>
+              <option value="/clear"></option>
+              <option value="/disconnect"></option>
+            </datalist>
           </div>
           <aside class="rrc-members">
             <span class="eyebrow">Room users</span>
