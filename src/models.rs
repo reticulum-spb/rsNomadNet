@@ -88,6 +88,8 @@ pub struct RrcHubView {
     pub supports_resources: bool,
     pub supports_actions: bool,
     pub supports_direct_notices: bool,
+    pub supports_room_state: bool,
+    pub supports_user_list: bool,
     pub max_message_bytes: Option<usize>,
     pub connected: bool,
     pub rooms: Vec<String>,

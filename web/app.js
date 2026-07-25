@@ -661,6 +661,8 @@ function renderRrc() {
       hub.supports_resources ? "Resources" : null,
       hub.supports_actions ? "Actions" : null,
       hub.supports_direct_notices ? "Direct notices" : null,
+      hub.supports_room_state ? "Room state" : null,
+      hub.supports_user_list ? "User roles" : null,
       hub.max_message_bytes ? `message limit ${hub.max_message_bytes} bytes` : null,
     ].filter(Boolean).join(" · ");
     button.addEventListener("click", () => {

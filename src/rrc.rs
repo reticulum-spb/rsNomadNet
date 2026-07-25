@@ -330,6 +330,8 @@ fn hub_view(hub: Hub, source: [u8; 16]) -> RrcHubView {
         supports_resources: welcome.is_some_and(|value| value.capabilities.resource_envelope),
         supports_actions: welcome.is_some_and(|value| value.capabilities.action),
         supports_direct_notices: welcome.is_some_and(|value| value.capabilities.direct_notice),
+        supports_room_state: welcome.is_some_and(|value| value.capabilities.room_state),
+        supports_user_list: welcome.is_some_and(|value| value.capabilities.user_list),
         max_message_bytes: welcome.and_then(|value| value.limits.max_message_bytes),
         connected: hub.connected && hub.welcome.is_some(),
         rooms: hub.rooms,
