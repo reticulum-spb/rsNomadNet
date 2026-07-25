@@ -307,6 +307,7 @@ fn forward_event(state: &std::sync::Arc<AppState>, source: [u8; 16], event: Even
             }
             Some(ServerEvent::RrcMessage(message))
         }
+        Event::RoomList { .. } | Event::UserList { .. } => None,
         Event::Envelope { .. } => None,
         Event::Resource(_) => None,
         Event::InvalidEnvelope { hub, error } => {
