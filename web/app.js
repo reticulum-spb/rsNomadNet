@@ -605,6 +605,15 @@ function connectEvents() {
       }
     } else if (message.type === "rrc_message") {
       state.rrc.messages.push(message.payload);
+      if (message.payload.hub_hash === state.rrc.activeHub
+          && message.payload.room === state.rrc.activeRoom
+          && message.payload.source_hash
+          && message.payload.nick) {
+        const user = state.rrc.users.find(
+          (candidate) => candidate.identity === message.payload.source_hash,
+        );
+        if (user) user.nick = message.payload.nick;
+      }
       if (message.payload.room
           && (message.payload.hub_hash !== state.rrc.activeHub
             || message.payload.room !== state.rrc.activeRoom)) {
@@ -615,7 +624,8 @@ function connectEvents() {
       if (message.payload.hub_hash === state.rrc.activeHub
           && message.payload.room === state.rrc.activeRoom
           && message.payload.kind === "notice"
-          && message.payload.body.startsWith("mode for ")) {
+          && (message.payload.body.startsWith("mode for ")
+            || message.payload.body.startsWith("nick changed:"))) {
         loadRrcUsers();
       }
     }
