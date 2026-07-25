@@ -64,6 +64,9 @@ pub struct MessageView {
     pub timestamp: i64,
     pub outbound: bool,
     pub state: String,
+    pub delivery_method: String,
+    pub attempts: u32,
+    pub last_error: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -136,6 +139,14 @@ pub struct SendMessageRequest {
     #[serde(default)]
     pub title: String,
     pub content: String,
+    #[serde(default = "default_delivery_method")]
+    pub delivery_method: String,
+    #[serde(default)]
+    pub propagation_node: Option<String>,
+}
+
+fn default_delivery_method() -> String {
+    "automatic".into()
 }
 
 #[derive(Debug, Clone, Serialize)]

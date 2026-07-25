@@ -7,6 +7,7 @@ use bytes::Bytes;
 use lxmf_core::application::DeliveryIdentity;
 use lxmf_core::constants::{DeliveryMethod, UnverifiedReason};
 use lxmf_core::message::LxMessage;
+use lxmf_core::propagation_client::{PropagationClient, PropagationClientState};
 use rns_crypto::ed25519::Ed25519PublicKey;
 use rns_identity::destination::Destination;
 use rns_identity::identity::Identity;
@@ -22,6 +23,7 @@ use tokio::sync::oneshot;
 use crate::app::AppState;
 use crate::browser::{BrowserPage, DownloadedFile, NomadUrl, parse_page};
 use crate::db::NewMessage;
+use crate::db::PendingMessage;
 use crate::models::{
     DirectoryEntry, InterfaceSnapshot, MessageView, NetworkSnapshot, NetworkState, ServerEvent,
 };
@@ -31,6 +33,8 @@ pub enum NetworkCommand {
         destination_hash: [u8; 16],
         title: String,
         content: String,
+        delivery_method: String,
+        propagation_node: Option<[u8; 16]>,
         response: oneshot::Sender<Result<MessageView, String>>,
     },
     FetchPage {
@@ -93,6 +97,7 @@ async fn run(state: Arc<AppState>) -> anyhow::Result<()> {
     let (delivery_tx, delivery_rx) = tokio::sync::mpsc::channel(256);
     let (packet_tx, mut packet_rx) = tokio::sync::mpsc::channel(256);
     let (resource_tx, mut resource_rx) = tokio::sync::mpsc::channel(64);
+    let (raw_tx, mut raw_rx) = tokio::sync::mpsc::channel(256);
     runtime
         .transport_tx
         .send(TransportMessage::RegisterDestination {
@@ -111,6 +116,7 @@ async fn run(state: Arc<AppState>) -> anyhow::Result<()> {
     );
     link_manager.set_link_packet_channel(packet_tx);
     link_manager.set_resource_completed_channel(resource_tx);
+    link_manager.set_inbound_raw_channel(raw_tx);
     let link_manager_task = tokio::spawn(link_manager.run());
     announce(&runtime, &mut delivery).await?;
     let mut delivery_announces = announce_stream(&runtime, Some("lxmf.delivery")).await?;
@@ -127,6 +133,16 @@ async fn run(state: Arc<AppState>) -> anyhow::Result<()> {
         *rrc_private_key,
         delivery.identity().hash,
     );
+    let mut propagation_client = PropagationClient::new(
+        runtime.transport_tx.clone(),
+        Some(delivery.identity().get_public_key()),
+        delivery.identity().get_signing_key(),
+    );
+    propagation_client.set_runtime(runtime.clone());
+    let mut selected_propagation_node = None;
+    let mut last_propagation_download = 0.0;
+    let (outbound_result_tx, mut outbound_result_rx) = tokio::sync::mpsc::channel(16);
+    let mut outbound_active = false;
 
     let mut command_rx = state
         .network_command_rx
@@ -134,6 +150,12 @@ async fn run(state: Arc<AppState>) -> anyhow::Result<()> {
         .await
         .take()
         .ok_or_else(|| anyhow::anyhow!("network command receiver already taken"))?;
+    let recovered = state
+        .database
+        .recover_interrupted_outbound(now_f64() as i64)?;
+    if recovered > 0 {
+        tracing::info!(recovered, "recovered interrupted outbound LXMF deliveries");
+    }
     refresh_interfaces(&state, &runtime, &destination_hash).await;
     let mut interval = tokio::time::interval(Duration::from_secs(2));
     loop {
@@ -149,13 +171,32 @@ async fn run(state: Arc<AppState>) -> anyhow::Result<()> {
                     receive_message(&state, &runtime, &payload).await;
                 }
             }
+            raw = raw_rx.recv() => {
+                if let Some(raw) = raw {
+                    receive_opportunistic_message(&state, &runtime, &delivery, &raw).await;
+                }
+            }
             command = command_rx.recv() => {
                 let Some(command) = command else { break };
                 match command {
-                    NetworkCommand::SendMessage { destination_hash, title, content, response } => {
-                        let result = send_direct(&state, &runtime, &delivery, destination_hash, &title, &content)
-                            .await
-                            .map_err(|error| error.to_string());
+                    NetworkCommand::SendMessage {
+                        destination_hash,
+                        title,
+                        content,
+                        delivery_method,
+                        propagation_node,
+                        response,
+                    } => {
+                        let result = queue_outbound(
+                            &state,
+                            &delivery,
+                            destination_hash,
+                            &title,
+                            &content,
+                            &delivery_method,
+                            propagation_node,
+                        )
+                        .map_err(|error| error.to_string());
                         let _ = response.send(result);
                     }
                     NetworkCommand::FetchPage { url, reload, fields, response } => {
@@ -187,8 +228,65 @@ async fn run(state: Arc<AppState>) -> anyhow::Result<()> {
                     process_announce(&state, announce, DirectoryKind::Propagation);
                 }
             }
+            result = outbound_result_rx.recv() => {
+                if let Some(result) = result {
+                    outbound_active = false;
+                    finish_outbound(&state, result);
+                }
+            }
             _ = interval.tick() => {
                 refresh_interfaces(&state, &runtime, &destination_hash).await;
+                propagation_client.tick();
+                for payload in propagation_client.take_received_messages() {
+                    receive_propagated_message(&state, &runtime, &delivery, &payload).await;
+                }
+                if let Some(node) = select_propagation_node(&state) {
+                    if selected_propagation_node != Some(node) {
+                        propagation_client.set_propagation_node(node);
+                        selected_propagation_node = Some(node);
+                        last_propagation_download = 0.0;
+                    }
+                    if now_f64() - last_propagation_download >= 90.0
+                        && propagation_client.state == PropagationClientState::Idle
+                    {
+                        runtime.transport_tx.send(TransportMessage::RequestPath {
+                            destination_hash: node,
+                        }).await.ok();
+                        if propagation_client.start_download() {
+                            last_propagation_download = now_f64();
+                        }
+                    }
+                }
+                if !outbound_active
+                    && let Some(pending) = state.database.pending_messages(now_f64() as i64, 1)?.into_iter().next()
+                {
+                    if let Ok(view) = state.database.update_message_delivery(
+                        pending.id,
+                        "sending",
+                        &pending.delivery_method,
+                        pending.attempts,
+                        (now_f64() as i64).saturating_add(180),
+                        None,
+                    ) {
+                        let _ = state.events.send(ServerEvent::MessageStored(view));
+                    }
+                    let state_for_task = state.clone();
+                    let runtime_for_task = runtime.clone();
+                    let private_key = delivery.identity().get_private_key()
+                        .ok_or_else(|| anyhow::anyhow!("local identity has no private key"))?
+                        .to_vec();
+                    let tx = outbound_result_tx.clone();
+                    outbound_active = true;
+                    tokio::spawn(async move {
+                        let result = attempt_outbound(
+                            &state_for_task,
+                            &runtime_for_task,
+                            &private_key,
+                            pending,
+                        ).await;
+                        let _ = tx.send(result).await;
+                    });
+                }
             }
         }
     }
@@ -373,6 +471,20 @@ enum DirectoryKind {
     Propagation,
 }
 
+struct OutboundAttemptResult {
+    message: PendingMessage,
+    method: String,
+    result: anyhow::Result<()>,
+}
+
+#[derive(Debug, thiserror::Error)]
+enum OpportunisticSendError {
+    #[error("opportunistic message exceeds Reticulum MTU")]
+    MtuExceeded,
+    #[error(transparent)]
+    Other(#[from] anyhow::Error),
+}
+
 fn process_announce(
     state: &Arc<AppState>,
     announce: rns_transport::messages::AnnounceHandlerEvent,
@@ -471,6 +583,13 @@ async fn receive_message(
                 _ => "source_unknown",
             }
         };
+        let message_hash = message.hash.or(message.message_id).map(hex::encode);
+        if message_hash
+            .as_deref()
+            .is_some_and(|hash| state.database.message_hash_exists(hash).unwrap_or(false))
+        {
+            return anyhow::Ok(());
+        }
         let source_hash = hex::encode(message.source_hash);
         let stored = state.database.store_message(NewMessage {
             destination_hash: &source_hash,
@@ -480,6 +599,11 @@ async fn receive_message(
             timestamp: message.timestamp as i64,
             outbound: false,
             state: verification_state,
+            delivery_method: "incoming",
+            attempts: 0,
+            next_attempt: 0,
+            last_error: None,
+            message_hash: message_hash.as_deref(),
         })?;
         let _ = state.events.send(ServerEvent::MessageStored(stored));
         anyhow::Ok(())
@@ -504,7 +628,11 @@ async fn verify_message(runtime: &reticulum::ReticulumHandle, message: &mut LxMe
         message.unverified_reason = Some(UnverifiedReason::SourceUnknown);
         return;
     };
-    let Ok(signing_bytes) = public_key[32..].try_into() else {
+    let Some(signing_bytes) = public_key.get(32..64) else {
+        message.unverified_reason = Some(UnverifiedReason::SignatureInvalid);
+        return;
+    };
+    let Ok(signing_bytes) = signing_bytes.try_into() else {
         message.unverified_reason = Some(UnverifiedReason::SignatureInvalid);
         return;
     };
@@ -514,26 +642,163 @@ async fn verify_message(runtime: &reticulum::ReticulumHandle, message: &mut LxMe
     }
 }
 
-async fn send_direct(
+fn queue_outbound(
     state: &Arc<AppState>,
-    runtime: &reticulum::ReticulumHandle,
     delivery: &DeliveryIdentity,
     recipient: [u8; 16],
     title: &str,
     content: &str,
+    requested_method: &str,
+    propagation_node: Option<[u8; 16]>,
 ) -> anyhow::Result<MessageView> {
+    let method = match requested_method.trim().to_ascii_lowercase().as_str() {
+        "" | "auto" | "automatic" => "automatic",
+        "opportunistic" => "opportunistic",
+        "direct" => "direct",
+        "propagated" => "propagated",
+        _ => anyhow::bail!("unknown LXMF delivery method"),
+    };
+    if method != "propagated" && propagation_node.is_some() {
+        anyhow::bail!("propagation_node is only valid for propagated delivery");
+    }
+    let recipient_hash = hex::encode(recipient);
+    let source_hash = hex::encode(delivery.destination_hash());
+    state.database.queue_message(
+        NewMessage {
+            destination_hash: &recipient_hash,
+            source_hash: &source_hash,
+            title,
+            content,
+            timestamp: now_f64() as i64,
+            outbound: true,
+            state: "queued",
+            delivery_method: method,
+            attempts: 0,
+            next_attempt: 0,
+            last_error: None,
+            message_hash: None,
+        },
+        propagation_node.as_ref().map(hex::encode).as_deref(),
+    )
+}
+
+async fn attempt_outbound(
+    state: &Arc<AppState>,
+    runtime: &reticulum::ReticulumHandle,
+    private_key: &[u8],
+    message: PendingMessage,
+) -> OutboundAttemptResult {
+    let result = async {
+        let recipient = parse_hash(&message.destination_hash)?;
+        let identity = Identity::from_private_key(private_key)?;
+        let delivery = DeliveryIdentity::new(identity, Some("rsNomadNet".into()), None)?;
+        match message.delivery_method.as_str() {
+            "automatic" => {
+                match send_opportunistic(
+                    runtime,
+                    &delivery,
+                    recipient,
+                    &message.title,
+                    &message.content,
+                )
+                .await
+                {
+                    Ok(()) => Ok("opportunistic"),
+                    Err(OpportunisticSendError::MtuExceeded) => {
+                        send_direct(
+                            runtime,
+                            &delivery,
+                            recipient,
+                            &message.title,
+                            &message.content,
+                        )
+                        .await?;
+                        Ok("direct")
+                    }
+                    Err(error) => Err(error.into()),
+                }
+            }
+            "opportunistic" => {
+                send_opportunistic(
+                    runtime,
+                    &delivery,
+                    recipient,
+                    &message.title,
+                    &message.content,
+                )
+                .await?;
+                Ok("opportunistic")
+            }
+            "direct" => {
+                send_direct(
+                    runtime,
+                    &delivery,
+                    recipient,
+                    &message.title,
+                    &message.content,
+                )
+                .await?;
+                Ok("direct")
+            }
+            "propagated" => {
+                let node = match message.propagation_node.as_deref() {
+                    Some(hash) => parse_hash(hash)?,
+                    None => select_propagation_node(state)
+                        .ok_or_else(|| anyhow::anyhow!("no active propagation node is known"))?,
+                };
+                let stamp_cost = state
+                    .database
+                    .destination_app_data(&hex::encode(node))?
+                    .as_deref()
+                    .and_then(lxmf_core::handlers::parse_pn_announce_data)
+                    .map(|data| data.stamp_cost)
+                    .unwrap_or(0);
+                send_propagated(
+                    runtime,
+                    &delivery,
+                    recipient,
+                    node,
+                    &message.title,
+                    &message.content,
+                    stamp_cost,
+                )
+                .await?;
+                Ok("propagated")
+            }
+            other => anyhow::bail!("unsupported queued delivery method {other}"),
+        }
+    }
+    .await;
+    match result {
+        Ok(method) => OutboundAttemptResult {
+            message,
+            method: method.into(),
+            result: Ok(()),
+        },
+        Err(error) => OutboundAttemptResult {
+            method: message.delivery_method.clone(),
+            message,
+            result: Err(error),
+        },
+    }
+}
+
+async fn destination_identity(
+    runtime: &reticulum::ReticulumHandle,
+    destination: [u8; 16],
+) -> anyhow::Result<Identity> {
     runtime
         .transport_tx
         .send(TransportMessage::RequestPath {
-            destination_hash: recipient,
+            destination_hash: destination,
         })
         .await?;
     runtime
-        .await_path(recipient, Duration::from_secs(30))
+        .await_path(destination, Duration::from_secs(30))
         .await?;
     let public_key = match runtime
         .query_control(TransportQuery::Recall {
-            destination_hash: recipient,
+            destination_hash: destination,
         })
         .await
     {
@@ -541,9 +806,55 @@ async fn send_direct(
         _ => None,
     }
     .ok_or_else(|| anyhow::anyhow!("destination identity is not known"))?;
+    Ok(Identity::from_public_key(&public_key)?)
+}
+
+async fn send_opportunistic(
+    runtime: &reticulum::ReticulumHandle,
+    delivery: &DeliveryIdentity,
+    recipient: [u8; 16],
+    title: &str,
+    content: &str,
+) -> Result<(), OpportunisticSendError> {
+    let remote = destination_identity(runtime, recipient).await?;
+    let message = delivery
+        .message(recipient, title, content, DeliveryMethod::Opportunistic)
+        .map_err(anyhow::Error::from)?;
+    let payload = message
+        .pack_opportunistic_encrypted(|plaintext| {
+            remote
+                .encrypt(plaintext, None)
+                .map_err(|error| lxmf_core::message::MessageError::PackFailed(error.to_string()))
+        })
+        .map_err(anyhow::Error::from)?;
+    match rns_runtime::application::send_pre_encrypted_packet_with_receipt(
+        runtime,
+        recipient,
+        &payload,
+        Duration::from_secs(15),
+    )
+    .await
+    {
+        Ok(_) => {}
+        Err(rns_runtime::application::ApplicationError::MtuExceeded { .. }) => {
+            return Err(OpportunisticSendError::MtuExceeded);
+        }
+        Err(error) => return Err(OpportunisticSendError::Other(error.into())),
+    }
+    Ok(())
+}
+
+async fn send_direct(
+    runtime: &reticulum::ReticulumHandle,
+    delivery: &DeliveryIdentity,
+    recipient: [u8; 16],
+    title: &str,
+    content: &str,
+) -> anyhow::Result<()> {
+    let remote = destination_identity(runtime, recipient).await?;
+    let public_key = remote.get_public_key();
 
     let message = delivery.message(recipient, title, content, DeliveryMethod::Direct)?;
-    let timestamp = message.timestamp as i64;
     let payload = message.pack()?;
     let private_key = delivery
         .identity()
@@ -563,22 +874,204 @@ async fn send_direct(
     link.send_payload(payload, true, Duration::from_secs(120))
         .await?;
     link.close().await?;
+    Ok(())
+}
 
-    let recipient_hash = hex::encode(recipient);
-    let source_hash = hex::encode(delivery.destination_hash());
-    let stored = state.database.store_message(NewMessage {
-        destination_hash: &recipient_hash,
-        source_hash: &source_hash,
-        title,
-        content,
-        timestamp,
-        outbound: true,
-        state: "delivered",
-    })?;
-    let _ = state
-        .events
-        .send(ServerEvent::MessageStored(stored.clone()));
-    Ok(stored)
+async fn send_propagated(
+    runtime: &reticulum::ReticulumHandle,
+    delivery: &DeliveryIdentity,
+    recipient: [u8; 16],
+    propagation_node: [u8; 16],
+    title: &str,
+    content: &str,
+    stamp_cost: u8,
+) -> anyhow::Result<()> {
+    let remote = destination_identity(runtime, recipient).await?;
+    let node = destination_identity(runtime, propagation_node).await?;
+    let mut message = delivery.message(recipient, title, content, DeliveryMethod::Propagated)?;
+    let (payload, _, _) = message.pack_propagated_encrypted_with_stamp(
+        |plaintext| {
+            remote
+                .encrypt(plaintext, None)
+                .map_err(|error| lxmf_core::message::MessageError::PackFailed(error.to_string()))
+        },
+        stamp_cost,
+    )?;
+    let private_key = delivery
+        .identity()
+        .get_private_key()
+        .ok_or_else(|| anyhow::anyhow!("local identity has no private key"))?;
+    let link_identity = Identity::from_private_key(private_key.as_ref())?;
+    let mut link = LinkSession::open_with_public_key(
+        runtime,
+        link_identity,
+        propagation_node,
+        node.get_public_key(),
+        1,
+        Duration::from_secs(30),
+    )
+    .await?;
+    link.identify().await?;
+    link.send_payload(payload, false, Duration::from_secs(120))
+        .await?;
+    link.close().await?;
+    Ok(())
+}
+
+fn select_propagation_node(state: &Arc<AppState>) -> Option<[u8; 16]> {
+    state
+        .database
+        .best_propagation_node()
+        .ok()
+        .flatten()
+        .and_then(|hash| parse_hash(&hash).ok())
+}
+
+fn finish_outbound(state: &Arc<AppState>, result: OutboundAttemptResult) {
+    let attempts = result.message.attempts.saturating_add(1);
+    let (status, next_attempt, error) = match result.result {
+        Ok(()) => {
+            let status = if result.method == "propagated" {
+                "stored_on_node"
+            } else {
+                "delivered"
+            };
+            (status, 0, None)
+        }
+        Err(error) => {
+            let text = error.to_string();
+            if attempts >= 5 || text.contains("exceeds Reticulum MTU") {
+                ("failed", 0, Some(text))
+            } else {
+                let delay = 5_i64.saturating_mul(1_i64 << attempts.min(6));
+                (
+                    "retrying",
+                    (now_f64() as i64).saturating_add(delay.min(300)),
+                    Some(text),
+                )
+            }
+        }
+    };
+    match state.database.update_message_delivery(
+        result.message.id,
+        status,
+        &result.method,
+        attempts,
+        next_attempt,
+        error.as_deref(),
+    ) {
+        Ok(message) => {
+            let _ = state.events.send(ServerEvent::MessageStored(message));
+        }
+        Err(error) => tracing::warn!(%error, "could not update outbound LXMF state"),
+    }
+}
+
+async fn receive_propagated_message(
+    state: &Arc<AppState>,
+    runtime: &reticulum::ReticulumHandle,
+    delivery: &DeliveryIdentity,
+    payload: &[u8],
+) {
+    if payload.len() < 16 || payload[..16] != delivery.destination_hash() {
+        tracing::warn!("discarding propagation payload for another destination");
+        return;
+    }
+    let plaintext = match delivery.identity().decrypt(&payload[16..], None, false) {
+        Ok(value) => value,
+        Err(error) => {
+            tracing::warn!(%error, "could not decrypt propagated LXMF message");
+            return;
+        }
+    };
+    let unpacked = if plaintext.len() >= 16 && plaintext[..16] == delivery.destination_hash() {
+        plaintext
+    } else {
+        let mut value = delivery.destination_hash().to_vec();
+        value.extend_from_slice(&plaintext);
+        value
+    };
+    receive_message(state, runtime, &unpacked).await;
+}
+
+async fn receive_opportunistic_message(
+    state: &Arc<AppState>,
+    runtime: &reticulum::ReticulumHandle,
+    delivery: &DeliveryIdentity,
+    raw: &[u8],
+) {
+    let (header, offset) = match rns_wire::header::PacketHeader::unpack(raw) {
+        Ok(value) => value,
+        Err(error) => {
+            tracing::warn!(%error, "could not parse opportunistic LXMF packet");
+            return;
+        }
+    };
+    if header.destination_hash != delivery.destination_hash() || raw.len() <= offset {
+        return;
+    }
+    let plaintext = match delivery.identity().decrypt(&raw[offset..], None, false) {
+        Ok(value) => value,
+        Err(error) => {
+            tracing::warn!(%error, "could not decrypt opportunistic LXMF packet");
+            return;
+        }
+    };
+    let unpacked = if plaintext.len() >= 16 && plaintext[..16] == delivery.destination_hash() {
+        plaintext
+    } else {
+        let mut value = delivery.destination_hash().to_vec();
+        value.extend_from_slice(&plaintext);
+        value
+    };
+    if LxMessage::unpack(&unpacked).is_err() {
+        tracing::warn!("discarding invalid opportunistic LXMF payload");
+        return;
+    }
+    if let Some(proof) = delivery_proof(delivery.identity(), raw, header.flags.header_type) {
+        let destination_hash = rns_wire::hash::truncated_packet_hash(raw, header.flags.header_type);
+        let _ = runtime
+            .transport_tx
+            .send(TransportMessage::Outbound(OutboundRequest {
+                raw: Bytes::from(proof),
+                destination_hash,
+            }))
+            .await;
+    }
+    receive_message(state, runtime, &unpacked).await;
+}
+
+fn delivery_proof(
+    identity: &Identity,
+    raw: &[u8],
+    header_type: rns_wire::flags::HeaderType,
+) -> Option<Vec<u8>> {
+    let full_hash = rns_wire::hash::packet_hash(raw, header_type);
+    let destination_hash = rns_wire::hash::truncated_packet_hash(raw, header_type);
+    let signature = identity.sign(&full_hash)?;
+    let mut proof = rns_wire::header::PacketHeader {
+        flags: rns_wire::flags::PacketFlags {
+            header_type: rns_wire::flags::HeaderType::Header1,
+            context_flag: false,
+            transport_type: rns_wire::flags::TransportType::Broadcast,
+            destination_type: rns_wire::flags::DestinationType::Single,
+            packet_type: rns_wire::flags::PacketType::Proof,
+        },
+        hops: 0,
+        transport_id: None,
+        destination_hash,
+        context: rns_wire::context::PacketContext::None,
+    }
+    .pack();
+    proof.extend_from_slice(&signature);
+    Some(proof)
+}
+
+fn parse_hash(value: &str) -> anyhow::Result<[u8; 16]> {
+    let bytes = hex::decode(value)?;
+    bytes
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("destination hash must contain 32 hexadecimal characters"))
 }
 
 fn now_f64() -> f64 {

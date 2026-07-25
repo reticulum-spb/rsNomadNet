@@ -1365,6 +1365,7 @@ dependencies = [
  "rns-identity",
  "rns-runtime",
  "rns-transport",
+ "rns-wire",
  "rs-rrc-client",
  "rusqlite",
  "serde",

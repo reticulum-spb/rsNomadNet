@@ -11,7 +11,17 @@ The current development slice provides:
 - an announced `lxmf.delivery` destination accepting packet and Resource
   deliveries;
 - signature verification against identities recalled by rsReticulum;
-- proof-backed outbound Direct delivery;
+- persistent outbound LXMF queue with automatic, opportunistic, Direct, and
+  propagated delivery;
+- proof-backed opportunistic and Direct delivery, including automatic
+  opportunistic-to-Direct fallback when a message exceeds the packet MTU;
+- exponential delivery retries, visible delivery states, terminal failure
+  reporting, and recovery of sends interrupted by an application restart;
+- automatic selection of the closest active propagation node, optional
+  per-message node override, stamped propagation deposits, and periodic
+  store-and-forward downloads;
+- inbound deduplication across opportunistic, Direct, Resource, and propagated
+  delivery paths;
 - persistent conversations and a web message composer;
 - live and cached announce discovery for `lxmf.delivery`,
   `nomadnetwork.node`, and `lxmf.propagation`;
@@ -67,7 +77,7 @@ access is not implemented yet.
 ## Status
 
 This repository is at an early vertical-slice stage. The web shell, database,
-runtime lifecycle, interface statistics, directory discovery, LXMF Direct
-send/receive, basic remote-page browsing, and event transport are functional.
-The remaining Micron style/partial surface and opportunistic and propagated
-LXMF delivery policy are the next implementation stages.
+runtime lifecycle, interface statistics, directory discovery, the complete
+LXMF delivery policy, basic remote-page browsing, and event transport are
+functional. The remaining Micron style and partial-request surface is the next
+implementation stage.

@@ -18,6 +18,7 @@ rns-crypto = { path = "../rsReticulum/crates/rns-crypto" }
 rns-identity = { path = "../rsReticulum/crates/rns-identity" }
 rns-runtime = { path = "../rsReticulum/crates/rns-runtime" }
 rns-transport = { path = "../rsReticulum/crates/rns-transport" }
+rns-wire = { path = "../rsReticulum/crates/rns-wire" }
 rusqlite = { version = "0.32", features = ["bundled"] }
 rmpv = "1"
 serde = { version = "1", features = ["derive"] }

@@ -538,9 +538,9 @@ async fn snapshot(State(state): State<Arc<AppState>>) -> Json<serde_json::Value>
     Json(json!({
         "network": network,
         "features": {
-            "messaging": "planned",
-            "browser": "planned",
-            "rrc": "planned",
+            "messaging": "available",
+            "browser": "available",
+            "rrc": "available",
             "interface_statistics": "available"
         }
     }))
@@ -602,6 +602,17 @@ async fn send_message(
         )
             .into_response();
     }
+    let delivery_method = request.delivery_method.trim().to_ascii_lowercase();
+    if !matches!(
+        delivery_method.as_str(),
+        "" | "auto" | "automatic" | "opportunistic" | "direct" | "propagated"
+    ) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "unknown LXMF delivery method"})),
+        )
+            .into_response();
+    }
     let network = state.network.read().await;
     if !matches!(network.state, crate::models::NetworkState::Online) {
         return (
@@ -612,6 +623,26 @@ async fn send_message(
     }
     drop(network);
     let destination_hash = parse_hash(&request.destination_hash).expect("validated above");
+    let propagation_node = match request.propagation_node.as_deref() {
+        Some(value) if !value.trim().is_empty() => match parse_hash(value) {
+            Ok(hash) => Some(hash),
+            Err(_) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({"error": "propagation node hash must contain 32 hexadecimal characters"})),
+                )
+                    .into_response();
+            }
+        },
+        _ => None,
+    };
+    if propagation_node.is_some() && delivery_method != "propagated" {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "propagation_node is only valid for propagated delivery"})),
+        )
+            .into_response();
+    }
     let (response_tx, response_rx) = oneshot::channel();
     if state
         .network_commands
@@ -619,6 +650,8 @@ async fn send_message(
             destination_hash,
             title: request.title,
             content: request.content,
+            delivery_method,
+            propagation_node,
             response: response_tx,
         })
         .await

@@ -181,12 +181,24 @@
   <dialog id="compose-dialog">
     <form id="compose-form">
       <div class="dialog-heading">
-        <div><span class="eyebrow">LXMF direct</span><h2>New message</h2></div>
+        <div><span class="eyebrow">LXMF delivery</span><h2>New message</h2></div>
         <button type="button" class="icon-button" id="close-compose" aria-label="Close">×</button>
       </div>
       <label>Destination hash<input name="destination_hash" list="known-peers" autocomplete="off" minlength="32" maxlength="32" pattern="[0-9a-fA-F]{32}" required placeholder="32 hexadecimal characters"></label>
       <datalist id="known-peers"></datalist>
       <label>Title <span class="optional">optional</span><input name="title" maxlength="1024"></label>
+      <label>Delivery
+        <select name="delivery_method">
+          <option value="automatic">Automatic (recommended)</option>
+          <option value="opportunistic">Opportunistic</option>
+          <option value="direct">Direct</option>
+          <option value="propagated">Propagated</option>
+        </select>
+      </label>
+      <label id="propagation-node-field" hidden>Propagation node <span class="optional">optional; best active node is selected automatically</span>
+        <input name="propagation_node" list="known-propagation-nodes" minlength="32" maxlength="32" pattern="[0-9a-fA-F]{32}" placeholder="32 hexadecimal characters">
+      </label>
+      <datalist id="known-propagation-nodes"></datalist>
       <label>Message<textarea name="content" rows="7" required></textarea></label>
       <p class="form-error" id="compose-error" role="alert"></p>
       <div class="dialog-actions">

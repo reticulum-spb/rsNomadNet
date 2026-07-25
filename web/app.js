@@ -539,6 +539,14 @@ async function loadDirectory() {
   const response = await fetch("/api/v1/directory");
   if (!response.ok) throw new Error("Could not load directory");
   state.directory = await response.json();
+  $("#known-propagation-nodes").replaceChildren(...state.directory
+    .filter((entry) => entry.kind === "propagation" && entry.active)
+    .map((entry) => {
+      const option = document.createElement("option");
+      option.value = entry.destination_hash;
+      option.label = entry.display_name || shortHash(entry.destination_hash);
+      return option;
+    }));
   renderDirectory();
 }
 
@@ -1056,6 +1064,9 @@ $("#browser-forward").addEventListener("click", () => {
 });
 
 const composeDialog = $("#compose-dialog");
+$("#compose-form [name=delivery_method]").addEventListener("change", (event) => {
+  $("#propagation-node-field").hidden = event.target.value !== "propagated";
+});
 $("#new-message").addEventListener("click", () => {
   $("#compose-error").textContent = "";
   composeDialog.showModal();
@@ -1068,7 +1079,7 @@ $("#compose-form").addEventListener("submit", async (event) => {
   const submit = $("#send-message");
   const values = Object.fromEntries(new FormData(form));
   submit.disabled = true;
-  submit.textContent = "Delivering…";
+  submit.textContent = "Queueing…";
   $("#compose-error").textContent = "";
   try {
     const response = await fetch("/api/v1/messages", {

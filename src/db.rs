@@ -21,6 +21,23 @@ pub struct NewMessage<'a> {
     pub timestamp: i64,
     pub outbound: bool,
     pub state: &'a str,
+    pub delivery_method: &'a str,
+    pub attempts: u32,
+    pub next_attempt: i64,
+    pub last_error: Option<&'a str>,
+    pub message_hash: Option<&'a str>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PendingMessage {
+    pub id: i64,
+    pub destination_hash: String,
+    pub title: String,
+    pub content: String,
+    pub delivery_method: String,
+    pub propagation_node: Option<String>,
+    pub attempts: u32,
+    pub next_attempt: i64,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -118,6 +135,35 @@ impl Database {
             ",
         )?;
         ensure_column(&connection, "rrc_hubs", "nick", "TEXT")?;
+        ensure_column(
+            &connection,
+            "messages",
+            "delivery_method",
+            "TEXT NOT NULL DEFAULT 'direct'",
+        )?;
+        ensure_column(&connection, "messages", "propagation_node", "TEXT")?;
+        ensure_column(
+            &connection,
+            "messages",
+            "attempts",
+            "INTEGER NOT NULL DEFAULT 0",
+        )?;
+        ensure_column(
+            &connection,
+            "messages",
+            "next_attempt",
+            "INTEGER NOT NULL DEFAULT 0",
+        )?;
+        ensure_column(&connection, "messages", "last_error", "TEXT")?;
+        ensure_column(&connection, "messages", "message_hash", "TEXT")?;
+        connection.execute(
+            "
+            CREATE UNIQUE INDEX IF NOT EXISTS messages_message_hash
+            ON messages(message_hash)
+            WHERE message_hash IS NOT NULL
+            ",
+            [],
+        )?;
         Ok(Self {
             connection: Arc::new(Mutex::new(connection)),
         })
@@ -250,8 +296,11 @@ impl Database {
                 display_name = COALESCE(excluded.display_name, known_destinations.display_name),
                 hops = excluded.hops,
                 last_seen = excluded.last_seen,
-                active = excluded.active,
-                app_data = excluded.app_data
+                active = CASE
+                    WHEN excluded.app_data IS NULL THEN known_destinations.active
+                    ELSE excluded.active
+                END,
+                app_data = COALESCE(excluded.app_data, known_destinations.app_data)
             ",
             params![
                 entry.destination_hash,
@@ -451,7 +500,7 @@ impl Database {
         let mut statement = connection.prepare(
             "
             SELECT id, destination_hash, source_hash, title, content,
-                   timestamp, outbound, state
+                   timestamp, outbound, state, delivery_method, attempts, last_error
             FROM messages
             WHERE destination_hash = ?1
             ORDER BY timestamp, id
@@ -468,8 +517,9 @@ impl Database {
         connection.execute(
             "
             INSERT INTO messages
-                (destination_hash, source_hash, title, content, timestamp, outbound, state)
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                (destination_hash, source_hash, title, content, timestamp, outbound, state,
+                 delivery_method, attempts, next_attempt, last_error, message_hash)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
             ",
             params![
                 message.destination_hash,
@@ -478,7 +528,12 @@ impl Database {
                 message.content,
                 message.timestamp,
                 message.outbound,
-                message.state
+                message.state,
+                message.delivery_method,
+                message.attempts,
+                message.next_attempt,
+                message.last_error,
+                message.message_hash,
             ],
         )?;
         Ok(MessageView {
@@ -490,7 +545,181 @@ impl Database {
             timestamp: message.timestamp,
             outbound: message.outbound,
             state: message.state.into(),
+            delivery_method: message.delivery_method.into(),
+            attempts: message.attempts,
+            last_error: message.last_error.map(str::to_string),
         })
+    }
+
+    pub fn queue_message(
+        &self,
+        message: NewMessage<'_>,
+        propagation_node: Option<&str>,
+    ) -> anyhow::Result<MessageView> {
+        let connection = self.connection.lock().expect("database mutex poisoned");
+        connection.execute(
+            "
+            INSERT INTO messages
+                (destination_hash, source_hash, title, content, timestamp, outbound, state,
+                 delivery_method, propagation_node, attempts, next_attempt, last_error,
+                 message_hash)
+            VALUES (?1, ?2, ?3, ?4, ?5, 1, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+            ",
+            params![
+                message.destination_hash,
+                message.source_hash,
+                message.title,
+                message.content,
+                message.timestamp,
+                message.state,
+                message.delivery_method,
+                propagation_node,
+                message.attempts,
+                message.next_attempt,
+                message.last_error,
+                message.message_hash,
+            ],
+        )?;
+        Ok(MessageView {
+            id: connection.last_insert_rowid(),
+            destination_hash: message.destination_hash.into(),
+            source_hash: message.source_hash.into(),
+            title: message.title.into(),
+            content: message.content.into(),
+            timestamp: message.timestamp,
+            outbound: true,
+            state: message.state.into(),
+            delivery_method: message.delivery_method.into(),
+            attempts: message.attempts,
+            last_error: message.last_error.map(str::to_string),
+        })
+    }
+
+    pub fn pending_messages(&self, now: i64, limit: usize) -> anyhow::Result<Vec<PendingMessage>> {
+        let connection = self.connection.lock().expect("database mutex poisoned");
+        let mut statement = connection.prepare(
+            "
+            SELECT id, destination_hash, title, content, delivery_method,
+                   propagation_node, attempts, next_attempt
+            FROM messages
+            WHERE outbound = 1
+              AND state IN ('queued', 'retrying', 'sending')
+              AND next_attempt <= ?1
+            ORDER BY next_attempt, id
+            LIMIT ?2
+            ",
+        )?;
+        let rows = statement.query_map(params![now, limit as i64], |row| {
+            Ok(PendingMessage {
+                id: row.get(0)?,
+                destination_hash: row.get(1)?,
+                title: row.get(2)?,
+                content: row.get(3)?,
+                delivery_method: row.get(4)?,
+                propagation_node: row.get(5)?,
+                attempts: row.get(6)?,
+                next_attempt: row.get(7)?,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    pub fn recover_interrupted_outbound(&self, now: i64) -> anyhow::Result<usize> {
+        let connection = self.connection.lock().expect("database mutex poisoned");
+        connection
+            .execute(
+                "
+                UPDATE messages
+                SET state = 'retrying', next_attempt = ?1,
+                    last_error = 'delivery interrupted by application restart'
+                WHERE outbound = 1 AND state = 'sending'
+                ",
+                [now],
+            )
+            .map_err(Into::into)
+    }
+
+    pub fn update_message_delivery(
+        &self,
+        id: i64,
+        state: &str,
+        delivery_method: &str,
+        attempts: u32,
+        next_attempt: i64,
+        last_error: Option<&str>,
+    ) -> anyhow::Result<MessageView> {
+        let connection = self.connection.lock().expect("database mutex poisoned");
+        connection.execute(
+            "
+            UPDATE messages
+            SET state = ?2, delivery_method = ?3, attempts = ?4,
+                next_attempt = ?5, last_error = ?6
+            WHERE id = ?1
+            ",
+            params![
+                id,
+                state,
+                delivery_method,
+                attempts,
+                next_attempt,
+                last_error,
+            ],
+        )?;
+        connection
+            .query_row(
+                "
+                SELECT id, destination_hash, source_hash, title, content,
+                       timestamp, outbound, state, delivery_method, attempts, last_error
+                FROM messages WHERE id = ?1
+                ",
+                [id],
+                map_message,
+            )
+            .map_err(Into::into)
+    }
+
+    pub fn best_propagation_node(&self) -> anyhow::Result<Option<String>> {
+        let connection = self.connection.lock().expect("database mutex poisoned");
+        let result = connection.query_row(
+            "
+            SELECT destination_hash
+            FROM known_destinations
+            WHERE kind = 'propagation' AND active = 1
+            ORDER BY hops, last_seen DESC
+            LIMIT 1
+            ",
+            [],
+            |row| row.get(0),
+        );
+        match result {
+            Ok(hash) => Ok(Some(hash)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    pub fn destination_app_data(&self, destination_hash: &str) -> anyhow::Result<Option<Vec<u8>>> {
+        let connection = self.connection.lock().expect("database mutex poisoned");
+        let result = connection.query_row(
+            "SELECT app_data FROM known_destinations WHERE destination_hash = ?1",
+            [destination_hash],
+            |row| row.get(0),
+        );
+        match result {
+            Ok(data) => Ok(data),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    pub fn message_hash_exists(&self, message_hash: &str) -> anyhow::Result<bool> {
+        let connection = self.connection.lock().expect("database mutex poisoned");
+        let count: i64 = connection.query_row(
+            "SELECT COUNT(*) FROM messages WHERE message_hash = ?1",
+            [message_hash],
+            |row| row.get(0),
+        )?;
+        Ok(count > 0)
     }
 }
 
@@ -504,6 +733,9 @@ fn map_message(row: &rusqlite::Row<'_>) -> rusqlite::Result<MessageView> {
         timestamp: row.get(5)?,
         outbound: row.get(6)?,
         state: row.get(7)?,
+        delivery_method: row.get(8)?,
+        attempts: row.get(9)?,
+        last_error: row.get(10)?,
     })
 }
 
@@ -541,10 +773,66 @@ mod tests {
                 timestamp: 10,
                 outbound: false,
                 state: "delivered",
+                delivery_method: "incoming",
+                attempts: 0,
+                next_attempt: 0,
+                last_error: None,
+                message_hash: Some("01"),
             })
             .unwrap();
         assert_eq!(database.conversations().unwrap().len(), 1);
         assert_eq!(database.messages("aa").unwrap()[0].content, "hello");
+        assert!(database.message_hash_exists("01").unwrap());
+        assert!(!database.message_hash_exists("02").unwrap());
+    }
+
+    #[test]
+    fn outbound_queue_survives_state_transitions() {
+        let database = Database::open(Path::new(":memory:")).unwrap();
+        let queued = database
+            .queue_message(
+                NewMessage {
+                    destination_hash: "aa",
+                    source_hash: "bb",
+                    title: "queued",
+                    content: "hello",
+                    timestamp: 10,
+                    outbound: true,
+                    state: "queued",
+                    delivery_method: "automatic",
+                    attempts: 0,
+                    next_attempt: 0,
+                    last_error: None,
+                    message_hash: None,
+                },
+                None,
+            )
+            .unwrap();
+        let pending = database.pending_messages(10, 10).unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].id, queued.id);
+
+        let retrying = database
+            .update_message_delivery(queued.id, "retrying", "direct", 1, 20, Some("no path"))
+            .unwrap();
+        assert_eq!(retrying.delivery_method, "direct");
+        assert_eq!(retrying.attempts, 1);
+        assert_eq!(retrying.last_error.as_deref(), Some("no path"));
+        assert!(database.pending_messages(19, 10).unwrap().is_empty());
+        assert_eq!(database.pending_messages(20, 10).unwrap().len(), 1);
+
+        database
+            .update_message_delivery(queued.id, "sending", "direct", 1, 200, None)
+            .unwrap();
+        assert_eq!(database.recover_interrupted_outbound(25).unwrap(), 1);
+        let recovered = database.pending_messages(25, 10).unwrap();
+        assert_eq!(recovered.len(), 1);
+        assert_eq!(recovered[0].next_attempt, 25);
+
+        database
+            .update_message_delivery(queued.id, "delivered", "direct", 2, 0, None)
+            .unwrap();
+        assert!(database.pending_messages(i64::MAX, 10).unwrap().is_empty());
     }
 
     #[test]
@@ -567,6 +855,32 @@ mod tests {
         let stored = database.directory().unwrap();
         assert_eq!(stored.len(), 1);
         assert_eq!(stored[0].hops, 1);
+    }
+
+    #[test]
+    fn selects_closest_active_propagation_node() {
+        let database = Database::open(Path::new(":memory:")).unwrap();
+        for (hash, hops, active) in [("aa", 3, true), ("bb", 1, false), ("cc", 2, true)] {
+            database
+                .upsert_directory(
+                    &DirectoryEntry {
+                        destination_hash: hash.into(),
+                        identity_hash: None,
+                        delivery_hash: None,
+                        kind: "propagation".into(),
+                        display_name: None,
+                        hops,
+                        last_seen: 10,
+                        active,
+                    },
+                    None,
+                )
+                .unwrap();
+        }
+        assert_eq!(
+            database.best_propagation_node().unwrap().as_deref(),
+            Some("cc")
+        );
     }
 
     #[test]

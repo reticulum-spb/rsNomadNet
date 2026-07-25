@@ -194,8 +194,8 @@ dialog form { display: grid; gap: 17px; padding: 24px; }
 .dialog-heading h2 { margin: 4px 0 0; font-size: 26px; }
 .icon-button { width: 34px; height: 34px; color: var(--muted); border: 1px solid var(--border); border-radius: 8px; background: transparent; font-size: 22px; cursor: pointer; }
 dialog label { display: grid; gap: 7px; color: var(--muted); font-size: 12px; font-weight: 650; }
-dialog input, dialog textarea { width: 100%; padding: 11px 12px; color: var(--text); border: 1px solid var(--border); border-radius: 8px; outline: none; background: #090c0b; resize: vertical; }
-dialog input:focus, dialog textarea:focus { border-color: var(--accent); box-shadow: 0 0 0 3px #d3ff5810; }
+dialog input, dialog textarea, dialog select { width: 100%; padding: 11px 12px; color: var(--text); border: 1px solid var(--border); border-radius: 8px; outline: none; background: #090c0b; resize: vertical; }
+dialog input:focus, dialog textarea:focus, dialog select:focus { border-color: var(--accent); box-shadow: 0 0 0 3px #d3ff5810; }
 .optional { color: #59635e; font-weight: 400; }
 .form-error { min-height: 18px; margin: 0; color: var(--danger); font-size: 12px; }
 .dialog-actions { display: flex; justify-content: flex-end; gap: 10px; }
