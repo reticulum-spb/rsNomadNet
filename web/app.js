@@ -87,7 +87,7 @@ function rrcTool(label, command, options = {}) {
 async function handleLocalRrcCommand(text) {
   const [name, ...args] = text.trim().split(/\s+/);
   const command = name.toLowerCase();
-  if (command === "/join") {
+  if (command === "/join" || command === "/j") {
     if (!args[0]) {
       $("#rrc-error").textContent = "usage: /join <room> [key]";
       return true;
@@ -95,6 +95,18 @@ async function handleLocalRrcCommand(text) {
     $("#rrc-room").value = args[0];
     $("#rrc-key").value = args.slice(1).join(" ");
     $("#rrc-join").click();
+    return true;
+  }
+  if (command === "/connect") {
+    const hub = args[0] || state.rrc.activeHub || $("#rrc-hub").value;
+    if (!hub) {
+      $("#rrc-error").textContent = "usage: /connect [hub-hash]";
+      return true;
+    }
+    const known = state.rrc.hubs.get(hub);
+    $("#rrc-hub").value = hub;
+    if (known?.nick) $("#rrc-nick").value = known.nick;
+    $("#rrc-connect").click();
     return true;
   }
   if (command === "/part" || command === "/leave") {
@@ -957,7 +969,7 @@ $("#rrc-compose").addEventListener("submit", async (event) => {
       room: state.rrc.activeRoom,
       source_hash: "",
       nick: "rsNomadNet",
-      body: "Client commands: /ping, /join <room> [key], /part [room] (/leave), /me <text>, /nick [name], /clear, /disconnect (/quit). Server command help follows.",
+      body: "Client commands: /connect [hub], /ping, /join <room> [key] (/j), /part [room] (/leave), /me <text>, /nick [name], /clear, /disconnect (/quit). Server command help follows.",
       timestamp_ms: Date.now(),
       kind: "notice",
     });
