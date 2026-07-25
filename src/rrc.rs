@@ -331,7 +331,7 @@ fn hub_view(hub: Hub, source: [u8; 16]) -> RrcHubView {
         supports_actions: welcome.is_some_and(|value| value.capabilities.action),
         supports_direct_notices: welcome.is_some_and(|value| value.capabilities.direct_notice),
         max_message_bytes: welcome.and_then(|value| value.limits.max_message_bytes),
-        connected: hub.connected,
+        connected: hub.connected && hub.welcome.is_some(),
         rooms: hub.rooms,
         room_states: hub
             .room_states
@@ -386,6 +386,17 @@ fn restore_saved_sessions(state: &std::sync::Arc<AppState>, client: &RrcClient) 
         tokio::spawn(async move {
             match client.connect(destination, hub.nick.as_deref()).await {
                 Ok(_) => {
+                    if let Err(error) = client
+                        .wait_until_connected(destination, std::time::Duration::from_secs(30))
+                        .await
+                    {
+                        tracing::warn!(
+                            hub = %hex::encode(destination),
+                            %error,
+                            "RRC hub did not become ready"
+                        );
+                        return;
+                    }
                     for (room, key) in hub.rooms {
                         if let Err(error) = client.join(destination, &room, key.as_deref()).await {
                             tracing::warn!(
