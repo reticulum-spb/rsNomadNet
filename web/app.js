@@ -779,6 +779,19 @@ function renderRrc() {
       roomState?.registered ? "Unregister" : "Register",
       `/${roomState?.registered ? "unregister" : "register"} ${room}`,
     ));
+    roomTools.push(
+      rrcTool("Invites", `/invite ${room} list`, { title: "Show room invite list" }),
+      rrcTool("Bans", `/ban ${room} list`, { title: "Show room ban list" }),
+    );
+    const unban = document.createElement("button");
+    unban.type = "button";
+    unban.textContent = "Unban…";
+    unban.title = "Prepare an /unban command";
+    unban.addEventListener("click", () => {
+      const target = window.prompt("Nickname or identity hash to unban");
+      if (target?.trim()) stageRrcCommand(`/unban ${room} ${target.trim()}`);
+    });
+    roomTools.push(unban);
   }
   $("#rrc-room-tools").replaceChildren(...roomTools);
   const visible = state.rrc.messages.filter((message) =>
@@ -829,6 +842,7 @@ function renderRrc() {
         user.voiced ? "−Voice" : "+Voice",
         `/${user.voiced ? "devoice" : "voice"} ${state.rrc.activeRoom} ${target}`,
       ),
+      rrcTool("Invite", `/invite ${state.rrc.activeRoom} add ${target}`),
       rrcTool("Kick", `/kick ${state.rrc.activeRoom} ${target}`, { danger: true }),
       rrcTool("Ban", `/ban ${state.rrc.activeRoom} add ${target}`, { danger: true }),
     );
