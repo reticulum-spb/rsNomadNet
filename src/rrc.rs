@@ -30,6 +30,11 @@ pub enum RrcCommand {
         destination_hash: [u8; 16],
         response: oneshot::Sender<Result<(), String>>,
     },
+    SetNick {
+        destination_hash: [u8; 16],
+        nick: String,
+        response: oneshot::Sender<Result<RrcHubView, String>>,
+    },
     ListRooms {
         destination_hash: [u8; 16],
         response: oneshot::Sender<Result<Vec<RrcRoomView>, String>>,
@@ -203,6 +208,28 @@ async fn handle_command(
             }
             let _ = response.send(result);
         }
+        RrcCommand::SetNick {
+            destination_hash,
+            nick,
+            response,
+        } => {
+            let result = client
+                .set_nick(destination_hash, &nick)
+                .await
+                .map(|hub| hub_view(hub, source))
+                .map_err(|error| error.to_string());
+            if let Ok(view) = &result
+                && let Err(error) = database.save_rrc_hub(
+                    &view.destination_hash,
+                    view.name.as_deref(),
+                    view.nick.as_deref(),
+                    unix_seconds(),
+                )
+            {
+                tracing::warn!(%error, "could not persist RRC nick");
+            }
+            let _ = response.send(result);
+        }
         RrcCommand::ListRooms {
             destination_hash,
             response,
@@ -298,6 +325,7 @@ fn hub_view(hub: Hub, source: [u8; 16]) -> RrcHubView {
         destination_hash: hex::encode(hub.destination_hash),
         local_identity: hex::encode(source),
         name: hub.name,
+        nick: hub.nick,
         version: welcome.and_then(|value| value.version.clone()),
         supports_resources: welcome.is_some_and(|value| value.capabilities.resource_envelope),
         supports_actions: welcome.is_some_and(|value| value.capabilities.action),

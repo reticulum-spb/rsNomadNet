@@ -33,6 +33,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/v1/browser/download", post(download_file))
         .route("/api/v1/rrc/connect", post(rrc_connect))
         .route("/api/v1/rrc/disconnect", post(rrc_disconnect))
+        .route("/api/v1/rrc/nick", post(rrc_nick))
         .route("/api/v1/rrc/join", post(rrc_join))
         .route("/api/v1/rrc/part", post(rrc_part))
         .route("/api/v1/rrc/list", post(rrc_list))
@@ -50,6 +51,12 @@ pub fn router(state: Arc<AppState>) -> Router {
 struct RrcConnectRequest {
     destination_hash: String,
     nick: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+struct RrcNickRequest {
+    destination_hash: String,
+    nick: String,
 }
 
 async fn rrc_connect(
@@ -251,6 +258,37 @@ async fn rrc_disconnect(
         return unavailable("RRC manager is unavailable");
     }
     rrc_unit_response(rx).await
+}
+
+async fn rrc_nick(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<RrcNickRequest>,
+) -> Response {
+    let Ok(destination_hash) = parse_hash(&request.destination_hash) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "invalid hub hash"})),
+        )
+            .into_response();
+    };
+    let (tx, rx) = oneshot::channel();
+    if state
+        .rrc_commands
+        .send(crate::rrc::RrcCommand::SetNick {
+            destination_hash,
+            nick: request.nick,
+            response: tx,
+        })
+        .await
+        .is_err()
+    {
+        return unavailable("RRC manager is unavailable");
+    }
+    match rx.await {
+        Ok(Ok(hub)) => Json(json!(hub)).into_response(),
+        Ok(Err(error)) => (StatusCode::BAD_REQUEST, Json(json!({"error": error}))).into_response(),
+        Err(_) => unavailable("RRC manager stopped"),
+    }
 }
 
 async fn rrc_list(

@@ -83,6 +83,7 @@ pub struct RrcHubView {
     pub destination_hash: String,
     pub local_identity: String,
     pub name: Option<String>,
+    pub nick: Option<String>,
     pub version: Option<String>,
     pub supports_resources: bool,
     pub supports_actions: bool,

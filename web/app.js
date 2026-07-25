@@ -113,6 +113,45 @@ async function handleLocalRrcCommand(text) {
     $("#rrc-disconnect").click();
     return true;
   }
+  if (command === "/nick") {
+    const currentHub = state.rrc.hubs.get(state.rrc.activeHub);
+    if (!args.length) {
+      state.rrc.messages.push({
+        hub_hash: state.rrc.activeHub,
+        room: state.rrc.activeRoom,
+        source_hash: "",
+        nick: "rsNomadNet",
+        body: `Nick on this hub: ${currentHub?.nick || "(unset)"}`,
+        timestamp_ms: Date.now(),
+        kind: "notice",
+      });
+      renderRrc();
+      return true;
+    }
+    const nick = args.join(" ");
+    const response = await fetch("/api/v1/rrc/nick", {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ destination_hash: state.rrc.activeHub, nick }),
+    });
+    const body = await response.json();
+    if (!response.ok) {
+      $("#rrc-error").textContent = body.error;
+      return true;
+    }
+    state.rrc.hubs.set(body.destination_hash, body);
+    state.rrc.messages.push({
+      hub_hash: state.rrc.activeHub,
+      room: state.rrc.activeRoom,
+      source_hash: "",
+      nick: "rsNomadNet",
+      body: `Nick on this hub set to ${body.nick}`,
+      timestamp_ms: Date.now(),
+      kind: "notice",
+    });
+    renderRrc();
+    if (state.rrc.activeRoom) loadRrcUsers();
+    return true;
+  }
   if (command === "/clear") {
     if (!state.rrc.activeHub || !state.rrc.activeRoom) {
       $("#rrc-error").textContent = "Select a room to clear";
@@ -918,7 +957,7 @@ $("#rrc-compose").addEventListener("submit", async (event) => {
       room: state.rrc.activeRoom,
       source_hash: "",
       nick: "rsNomadNet",
-      body: "Client commands: /ping, /join <room> [key], /part [room] (/leave), /me <text>, /clear, /disconnect (/quit). Server command help follows.",
+      body: "Client commands: /ping, /join <room> [key], /part [room] (/leave), /me <text>, /nick [name], /clear, /disconnect (/quit). Server command help follows.",
       timestamp_ms: Date.now(),
       kind: "notice",
     });
