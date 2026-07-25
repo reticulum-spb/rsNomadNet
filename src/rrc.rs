@@ -39,6 +39,10 @@ pub enum RrcCommand {
         room: String,
         response: oneshot::Sender<Result<Vec<RrcUserView>, String>>,
     },
+    Ping {
+        destination_hash: [u8; 16],
+        response: oneshot::Sender<Result<u64, String>>,
+    },
     Send {
         destination_hash: [u8; 16],
         room: Option<String>,
@@ -237,6 +241,17 @@ async fn handle_command(
                         })
                         .collect()
                 })
+                .map_err(|error| error.to_string());
+            let _ = response.send(result);
+        }
+        RrcCommand::Ping {
+            destination_hash,
+            response,
+        } => {
+            let result = client
+                .ping(destination_hash, std::time::Duration::from_secs(30))
+                .await
+                .map(|duration| duration.as_millis().min(u128::from(u64::MAX)) as u64)
                 .map_err(|error| error.to_string());
             let _ = response.send(result);
         }

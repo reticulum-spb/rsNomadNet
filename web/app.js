@@ -84,6 +84,81 @@ function rrcTool(label, command, options = {}) {
   return button;
 }
 
+async function handleLocalRrcCommand(text) {
+  const [name, ...args] = text.trim().split(/\s+/);
+  const command = name.toLowerCase();
+  if (command === "/join") {
+    if (!args[0]) {
+      $("#rrc-error").textContent = "usage: /join <room> [key]";
+      return true;
+    }
+    $("#rrc-room").value = args[0];
+    $("#rrc-key").value = args.slice(1).join(" ");
+    $("#rrc-join").click();
+    return true;
+  }
+  if (command === "/part" || command === "/leave") {
+    const room = (args[0] || state.rrc.activeRoom || "").replace(/^#/, "").toLowerCase();
+    const hub = state.rrc.hubs.get(state.rrc.activeHub);
+    if (!room || !hub?.rooms.includes(room)) {
+      $("#rrc-error").textContent = "usage: /part [joined-room]";
+      return true;
+    }
+    state.rrc.activeRoom = room;
+    renderRrc();
+    $("#rrc-part").click();
+    return true;
+  }
+  if (command === "/disconnect" || command === "/quit") {
+    $("#rrc-disconnect").click();
+    return true;
+  }
+  if (command === "/clear") {
+    if (!state.rrc.activeHub || !state.rrc.activeRoom) {
+      $("#rrc-error").textContent = "Select a room to clear";
+      return true;
+    }
+    const response = await fetch("/api/v1/rrc/clear", {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        destination_hash: state.rrc.activeHub,
+        room: state.rrc.activeRoom,
+      }),
+    });
+    const body = await response.json();
+    if (!response.ok) {
+      $("#rrc-error").textContent = body.error;
+      return true;
+    }
+    const hubHash = state.rrc.activeHub;
+    const room = state.rrc.activeRoom;
+    state.rrc.messages = state.rrc.messages.filter(
+      (message) => message.hub_hash !== hubHash || message.room !== room,
+    );
+    renderRrc();
+    return true;
+  }
+  if (command === "/ping") {
+    const response = await fetch("/api/v1/rrc/ping", {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ destination_hash: state.rrc.activeHub }),
+    });
+    const body = await response.json();
+    state.rrc.messages.push({
+      hub_hash: state.rrc.activeHub,
+      room: state.rrc.activeRoom,
+      source_hash: "",
+      nick: "rsNomadNet",
+      body: response.ok ? `Ping: ${body.milliseconds} ms` : `Ping failed: ${body.error}`,
+      timestamp_ms: Date.now(),
+      kind: response.ok ? "notice" : "error",
+    });
+    renderRrc();
+    return true;
+  }
+  return false;
+}
+
 function renderConversations() {
   const container = $("#conversation-list");
   if (!state.conversations.length) {
@@ -832,13 +907,18 @@ $("#rrc-compose").addEventListener("submit", async (event) => {
   const bodyText = $("#rrc-body").value;
   const isCommand = bodyText.startsWith("/") && !bodyText.startsWith("/me ");
   if (!state.rrc.activeHub || (!state.rrc.activeRoom && !isCommand) || !bodyText) return;
+  $("#rrc-error").textContent = "";
+  if (await handleLocalRrcCommand(bodyText)) {
+    $("#rrc-body").value = "";
+    return;
+  }
   if (bodyText.trim().toLowerCase() === "/help") {
     state.rrc.messages.push({
       hub_hash: state.rrc.activeHub,
       room: state.rrc.activeRoom,
       source_hash: "",
       nick: "rsNomadNet",
-      body: "Client command: /me <text> sends an action. Server command help follows.",
+      body: "Client commands: /ping, /join <room> [key], /part [room] (/leave), /me <text>, /clear, /disconnect (/quit). Server command help follows.",
       timestamp_ms: Date.now(),
       kind: "notice",
     });

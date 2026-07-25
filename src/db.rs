@@ -346,6 +346,16 @@ impl Database {
         Ok(messages)
     }
 
+    pub fn clear_rrc_messages(&self, hub_hash: &str, room: &str) -> anyhow::Result<usize> {
+        let connection = self.connection.lock().expect("database mutex poisoned");
+        connection
+            .execute(
+                "DELETE FROM rrc_messages WHERE hub_hash = ?1 AND room = ?2",
+                params![hub_hash, room],
+            )
+            .map_err(Into::into)
+    }
+
     pub fn cached_page(&self, url: &str, now: i64) -> anyhow::Result<Option<Vec<u8>>> {
         let connection = self.connection.lock().expect("database mutex poisoned");
         let result = connection.query_row(
@@ -575,6 +585,14 @@ mod tests {
         let messages = database.rrc_messages("aa", Some("rust")).unwrap();
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].body, "hello rust");
+        assert_eq!(database.clear_rrc_messages("aa", "rust").unwrap(), 1);
+        assert!(
+            database
+                .rrc_messages("aa", Some("rust"))
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(database.rrc_messages("aa", Some("bots")).unwrap().len(), 1);
     }
 
     #[test]

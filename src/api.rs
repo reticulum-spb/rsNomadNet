@@ -38,6 +38,8 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/v1/rrc/list", post(rrc_list))
         .route("/api/v1/rrc/who", post(rrc_who))
         .route("/api/v1/rrc/send", post(rrc_send))
+        .route("/api/v1/rrc/ping", post(rrc_ping))
+        .route("/api/v1/rrc/clear", post(rrc_clear))
         .route("/api/v1/rrc/history/{destination_hash}", get(rrc_history))
         .route("/api/v1/events", get(events))
         .layer(TraceLayer::new_for_http())
@@ -161,6 +163,68 @@ async fn rrc_part(
         return unavailable("RRC manager is unavailable");
     }
     rrc_unit_response(rx).await
+}
+
+async fn rrc_clear(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<RrcJoinRequest>,
+) -> Response {
+    let Ok(destination_hash) = parse_hash(&request.destination_hash) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "invalid hub hash"})),
+        )
+            .into_response();
+    };
+    let room = request
+        .room
+        .trim()
+        .trim_start_matches('#')
+        .to_ascii_lowercase();
+    if room.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "room is required"})),
+        )
+            .into_response();
+    }
+    match state
+        .database
+        .clear_rrc_messages(&hex::encode(destination_hash), &room)
+    {
+        Ok(deleted) => Json(json!({"deleted": deleted})).into_response(),
+        Err(error) => internal_error(error),
+    }
+}
+
+async fn rrc_ping(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<RrcHubRequest>,
+) -> Response {
+    let Ok(destination_hash) = parse_hash(&request.destination_hash) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "invalid hub hash"})),
+        )
+            .into_response();
+    };
+    let (tx, rx) = oneshot::channel();
+    if state
+        .rrc_commands
+        .send(crate::rrc::RrcCommand::Ping {
+            destination_hash,
+            response: tx,
+        })
+        .await
+        .is_err()
+    {
+        return unavailable("RRC manager is unavailable");
+    }
+    match rx.await {
+        Ok(Ok(milliseconds)) => Json(json!({"milliseconds": milliseconds})).into_response(),
+        Ok(Err(error)) => (StatusCode::BAD_GATEWAY, Json(json!({"error": error}))).into_response(),
+        Err(_) => unavailable("RRC manager stopped"),
+    }
 }
 
 async fn rrc_disconnect(
