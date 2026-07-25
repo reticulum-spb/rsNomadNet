@@ -232,6 +232,8 @@ async fn handle_command(
                         .map(|user| RrcUserView {
                             nick: user.nick,
                             identity: user.identity,
+                            operator: user.operator,
+                            voiced: user.voiced,
                         })
                         .collect()
                 })

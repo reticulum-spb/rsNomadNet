@@ -466,6 +466,12 @@ function connectEvents() {
         state.rrc.unreadRooms.set(key, (state.rrc.unreadRooms.get(key) || 0) + 1);
       }
       renderRrc();
+      if (message.payload.hub_hash === state.rrc.activeHub
+          && message.payload.room === state.rrc.activeRoom
+          && message.payload.kind === "notice"
+          && message.payload.body.startsWith("mode for ")) {
+        loadRrcUsers();
+      }
     }
   });
   socket.addEventListener("close", () => {
@@ -662,15 +668,21 @@ function renderRrc() {
     const item = document.createElement("div");
     item.className = "rrc-user";
     const name = document.createElement("strong");
-    name.textContent = user.nick || shortHash(user.identity);
+    name.textContent = `${user.operator ? "@" : user.voiced ? "+" : ""}${user.nick || shortHash(user.identity)}`;
     const identity = document.createElement("small");
     identity.textContent = user.identity;
     const actions = document.createElement("div");
     actions.className = "rrc-user-actions";
     const target = user.identity;
     actions.append(
-      rrcTool("+Op", `/op ${state.rrc.activeRoom} ${target}`),
-      rrcTool("+Voice", `/voice ${state.rrc.activeRoom} ${target}`),
+      rrcTool(
+        user.operator ? "−Op" : "+Op",
+        `/${user.operator ? "deop" : "op"} ${state.rrc.activeRoom} ${target}`,
+      ),
+      rrcTool(
+        user.voiced ? "−Voice" : "+Voice",
+        `/${user.voiced ? "devoice" : "voice"} ${state.rrc.activeRoom} ${target}`,
+      ),
       rrcTool("Kick", `/kick ${state.rrc.activeRoom} ${target}`, { danger: true }),
       rrcTool("Ban", `/ban ${state.rrc.activeRoom} add ${target}`, { danger: true }),
     );

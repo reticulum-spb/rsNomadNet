@@ -123,6 +123,8 @@ pub struct RrcRoomView {
 pub struct RrcUserView {
     pub nick: Option<String>,
     pub identity: String,
+    pub operator: bool,
+    pub voiced: bool,
 }
 
 #[derive(Debug, Deserialize)]
