@@ -1,0 +1,5 @@
+/target
+/.rsnomadnet
+*.db-shm
+*.db-wal
+

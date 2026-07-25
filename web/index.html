@@ -1,0 +1,186 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>rsNomadNet</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <div class="shell">
+    <header class="topbar">
+      <a class="brand" href="/" aria-label="rsNomadNet home">
+        <span class="brand-mark">N</span>
+        <span>rsNomadNet</span>
+      </a>
+      <div class="network-pill" id="network-pill">
+        <span class="status-dot"></span>
+        <span id="network-label">Connecting…</span>
+      </div>
+    </header>
+
+    <aside class="sidebar">
+      <nav aria-label="Main navigation">
+        <button class="nav-item active" data-view="messages">
+          <span class="nav-icon">◫</span><span>Messages</span>
+        </button>
+        <button class="nav-item" data-view="network">
+          <span class="nav-icon">⌁</span><span>Network</span>
+        </button>
+        <button class="nav-item" data-view="browser">
+          <span class="nav-icon">◎</span><span>Browser</span>
+        </button>
+        <button class="nav-item" data-view="rrc">
+          <span class="nav-icon">#</span><span>RRC</span>
+        </button>
+      </nav>
+      <div class="identity-card">
+        <span class="eyebrow">Local identity</span>
+        <code id="identity-hash">Not available</code>
+      </div>
+    </aside>
+
+    <main>
+      <section class="view active" id="view-messages">
+        <div class="page-heading">
+          <div>
+            <span class="eyebrow">LXMF</span>
+            <h1>Messages</h1>
+            <p>Private conversations across your Reticulum network.</p>
+          </div>
+          <button class="primary" id="new-message">New message</button>
+        </div>
+        <div class="split-panel">
+          <div class="conversation-list" id="conversation-list">
+            <div class="empty compact">
+              <span class="empty-icon">◇</span>
+              <strong>No conversations yet</strong>
+              <span>Incoming LXMF messages will appear here.</span>
+            </div>
+          </div>
+          <div class="conversation-stage">
+            <div class="empty" id="conversation-empty">
+              <span class="empty-icon">◈</span>
+              <strong>Select a conversation</strong>
+              <span>Choose a peer or start a new encrypted message.</span>
+            </div>
+            <div class="message-thread" id="message-thread" hidden>
+              <header>
+                <strong id="thread-name"></strong>
+                <code id="thread-hash"></code>
+              </header>
+              <div class="message-list" id="message-list"></div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="view" id="view-network">
+        <div class="page-heading">
+          <div>
+            <span class="eyebrow">Reticulum</span>
+            <h1>Network</h1>
+            <p>Read-only health and traffic statistics.</p>
+          </div>
+        </div>
+        <div class="metric-grid">
+          <article class="metric"><span>Interfaces</span><strong id="metric-interfaces">0</strong></article>
+          <article class="metric"><span>Received</span><strong id="metric-rx">0 B</strong></article>
+          <article class="metric"><span>Transmitted</span><strong id="metric-tx">0 B</strong></article>
+          <article class="metric"><span>TX drops</span><strong id="metric-drops">0</strong></article>
+        </div>
+        <div class="table-card">
+          <table>
+            <thead><tr><th>Interface</th><th>Status</th><th>Mode</th><th>Traffic</th><th>Rate</th><th>MTU</th></tr></thead>
+            <tbody id="interface-rows"></tbody>
+          </table>
+          <div class="empty compact" id="interfaces-empty">
+            <strong>No interface data</strong>
+            <span>Start without <code>--offline</code> to connect rsReticulum.</span>
+          </div>
+        </div>
+        <div class="section-heading">
+          <div><span class="eyebrow">Announces</span><h2>Known destinations</h2></div>
+          <span class="muted" id="directory-count">0 discovered</span>
+        </div>
+        <div class="directory-grid" id="directory-grid">
+          <div class="empty compact" id="directory-empty">
+            <strong>No announces received</strong>
+            <span>Peers and NomadNet nodes will appear as they announce.</span>
+          </div>
+        </div>
+      </section>
+
+      <section class="view" id="view-browser">
+        <div class="page-heading"><div><span class="eyebrow">NomadNet</span><h1>Browser</h1><p>Remote Micron pages over Reticulum.</p></div></div>
+        <div class="address-bar">
+          <button class="browser-control" id="browser-back" disabled aria-label="Back">←</button>
+          <button class="browser-control" id="browser-forward" disabled aria-label="Forward">→</button>
+          <button class="browser-control" id="browser-reload" disabled aria-label="Reload">↻</button>
+          <input id="browser-address" aria-label="NomadNet address" placeholder="destination_hash:/page/index.mu">
+          <button id="browser-go">Go</button>
+        </div>
+        <div class="browser-status" id="browser-status"></div>
+        <div class="browser-page" id="browser-page">
+          <div class="feature-placeholder"><span>◎</span><h2>NomadNet browser</h2><p>Enter a node destination or choose Browse on a discovered node.</p></div>
+        </div>
+      </section>
+
+      <section class="view" id="view-rrc">
+        <div class="page-heading"><div><span class="eyebrow">Realtime rooms</span><h1>RRC</h1><p>Connect to compatible rsRRCD and Python RRC hubs.</p></div></div>
+        <div class="rrc-connect">
+          <input id="rrc-hub" placeholder="RRC hub destination hash" maxlength="32">
+          <input id="rrc-nick" placeholder="Nickname" maxlength="32">
+          <button class="primary" id="rrc-connect">Connect</button>
+        </div>
+        <p class="form-error" id="rrc-error"></p>
+        <div class="rrc-layout">
+          <aside id="rrc-hubs"><div class="empty compact"><strong>No connected hubs</strong></div></aside>
+          <div class="rrc-room">
+            <div class="rrc-status" id="rrc-status" data-state="idle">
+              <span class="status-dot"></span>
+              <span>No hub selected</span>
+            </div>
+            <div class="rrc-join">
+              <input id="rrc-room" placeholder="Room">
+              <button id="rrc-join">Join</button>
+              <button id="rrc-part">Part</button>
+              <button id="rrc-list">Rooms</button>
+              <button id="rrc-who">Users</button>
+              <button id="rrc-disconnect" class="danger">Disconnect</button>
+            </div>
+            <nav class="rrc-rooms" id="rrc-rooms" aria-label="RRC rooms"></nav>
+            <div class="rrc-list-status" id="rrc-list-status"></div>
+            <div class="rrc-messages" id="rrc-messages"></div>
+            <form class="rrc-compose" id="rrc-compose"><input id="rrc-body" placeholder="Message or /help" autocomplete="off"><button class="primary">Send</button></form>
+          </div>
+          <aside class="rrc-members">
+            <span class="eyebrow">Room users</span>
+            <div id="rrc-users"><div class="empty compact">Select a room</div></div>
+          </aside>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <dialog id="compose-dialog">
+    <form id="compose-form">
+      <div class="dialog-heading">
+        <div><span class="eyebrow">LXMF direct</span><h2>New message</h2></div>
+        <button type="button" class="icon-button" id="close-compose" aria-label="Close">×</button>
+      </div>
+      <label>Destination hash<input name="destination_hash" list="known-peers" autocomplete="off" minlength="32" maxlength="32" pattern="[0-9a-fA-F]{32}" required placeholder="32 hexadecimal characters"></label>
+      <datalist id="known-peers"></datalist>
+      <label>Title <span class="optional">optional</span><input name="title" maxlength="1024"></label>
+      <label>Message<textarea name="content" rows="7" required></textarea></label>
+      <p class="form-error" id="compose-error" role="alert"></p>
+      <div class="dialog-actions">
+        <button type="button" class="secondary" id="cancel-compose">Cancel</button>
+        <button type="submit" class="primary" id="send-message">Send securely</button>
+      </div>
+    </form>
+  </dialog>
+  <script src="/app.js" defer></script>
+</body>
+</html>
