@@ -8,6 +8,7 @@ const state = {
   rrc: {
     hubs: new Map(), activeHub: null, activeRoom: null, messages: [],
     availableRooms: new Map(), roomListsLoaded: new Set(), users: [],
+    unreadRooms: new Map(),
   },
 };
 
@@ -56,6 +57,14 @@ function renderNetwork(network) {
 
 function shortHash(hash) {
   return `${hash.slice(0, 8)}…${hash.slice(-6)}`;
+}
+
+function rrcRoomKey(hubHash, room) {
+  return `${hubHash}:${room}`;
+}
+
+function markRrcRoomRead(hubHash, room) {
+  if (hubHash && room) state.rrc.unreadRooms.delete(rrcRoomKey(hubHash, room));
 }
 
 function renderConversations() {
@@ -433,6 +442,12 @@ function connectEvents() {
       }
     } else if (message.type === "rrc_message") {
       state.rrc.messages.push(message.payload);
+      if (message.payload.room
+          && (message.payload.hub_hash !== state.rrc.activeHub
+            || message.payload.room !== state.rrc.activeRoom)) {
+        const key = rrcRoomKey(message.payload.hub_hash, message.payload.room);
+        state.rrc.unreadRooms.set(key, (state.rrc.unreadRooms.get(key) || 0) + 1);
+      }
       renderRrc();
     }
   });
@@ -467,6 +482,7 @@ function renderRrc() {
     button.addEventListener("click", () => {
       state.rrc.activeHub = hub.destination_hash;
       if (!hub.rooms.includes(state.rrc.activeRoom)) state.rrc.activeRoom = hub.rooms[0] || null;
+      markRrcRoomRead(state.rrc.activeHub, state.rrc.activeRoom);
       renderRrc();
       loadRrcHistory();
       loadRrcRooms();
@@ -509,9 +525,12 @@ function renderRrc() {
     const button = document.createElement("button");
     button.className = "rrc-room-tab";
     button.classList.toggle("active", room === state.rrc.activeRoom);
-    button.textContent = `#${room}`;
+    const unread = state.rrc.unreadRooms.get(rrcRoomKey(state.rrc.activeHub, room)) || 0;
+    button.classList.toggle("unread", unread > 0);
+    button.textContent = unread ? `#${room} (${unread})` : `#${room}`;
     button.addEventListener("click", () => {
       state.rrc.activeRoom = room;
+      markRrcRoomRead(state.rrc.activeHub, room);
       renderRrc();
       loadRrcHistory();
       loadRrcUsers();
@@ -656,9 +675,11 @@ $("#rrc-join").addEventListener("click", async () => {
     body: JSON.stringify({ destination_hash: state.rrc.activeHub, room }),
   });
   const body = await response.json();
-  if (!response.ok) $("#rrc-error").textContent = body.error;
-  else {
+  if (!response.ok) {
+    $("#rrc-error").textContent = body.error;
+  } else {
     state.rrc.activeRoom = room.replace(/^#/, "").toLowerCase();
+    markRrcRoomRead(state.rrc.activeHub, state.rrc.activeRoom);
     loadRrcHistory();
     loadRrcUsers();
   }
@@ -675,7 +696,11 @@ $("#rrc-part").addEventListener("click", async () => {
     }),
   });
   const body = await response.json();
-  if (!response.ok) $("#rrc-error").textContent = body.error;
+  if (!response.ok) {
+    $("#rrc-error").textContent = body.error;
+  } else {
+    markRrcRoomRead(state.rrc.activeHub, state.rrc.activeRoom);
+  }
 });
 $("#rrc-disconnect").addEventListener("click", async () => {
   if (!state.rrc.activeHub) return;
@@ -690,6 +715,9 @@ $("#rrc-disconnect").addEventListener("click", async () => {
     return;
   }
   state.rrc.hubs.delete(destinationHash);
+  for (const key of state.rrc.unreadRooms.keys()) {
+    if (key.startsWith(`${destinationHash}:`)) state.rrc.unreadRooms.delete(key);
+  }
   state.rrc.activeHub = state.rrc.hubs.keys().next().value || null;
   state.rrc.activeRoom = state.rrc.hubs.get(state.rrc.activeHub)?.rooms[0] || null;
   renderRrc();

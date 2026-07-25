@@ -158,6 +158,7 @@ td.offline { color: var(--danger); }
 .rrc-rooms { display: flex; gap: 6px; min-height: 43px; padding: 7px 12px; border-bottom: 1px solid var(--border); overflow-x: auto; }
 .rrc-room-tab { padding: 6px 10px; color: var(--muted); border: 1px solid var(--border); border-radius: 999px; background: transparent; white-space: nowrap; cursor: pointer; }
 .rrc-room-tab.active { color: var(--accent); border-color: var(--accent); background: var(--accent-dim); }
+.rrc-room-tab.unread { color: var(--text); border-color: var(--accent); font-weight: 700; }
 .rrc-room-tab.available:not(.active) { border-style: dashed; }
 .rrc-list-status { min-height: 0; padding: 0 12px; color: var(--muted); font-size: 12px; white-space: pre-line; }
 .rrc-list-status:not(:empty) { padding-top: 7px; padding-bottom: 7px; border-bottom: 1px solid var(--border); }
