@@ -52,7 +52,7 @@ pub fn spawn(
     state: std::sync::Arc<AppState>,
     runtime: ReticulumHandle,
     private_key: [u8; 64],
-    _source: [u8; 16],
+    source: [u8; 16],
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let identity = match Identity::from_private_key(&private_key) {
@@ -76,11 +76,11 @@ pub fn spawn(
                 }
                 command = commands.recv() => {
                     let Some(command) = command else { break };
-                    handle_command(&client, &state.database, command).await;
+                    handle_command(&client, &state.database, source, command).await;
                 }
                 event = events.recv() => {
                     match event {
-                        Ok(event) => forward_event(&state, event),
+                        Ok(event) => forward_event(&state, source, event),
                         Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
                             tracing::warn!(skipped, "RRC event adapter lagged");
                         }
@@ -92,7 +92,12 @@ pub fn spawn(
     })
 }
 
-async fn handle_command(client: &RrcClient, database: &Database, command: RrcCommand) {
+async fn handle_command(
+    client: &RrcClient,
+    database: &Database,
+    source: [u8; 16],
+    command: RrcCommand,
+) {
     match command {
         RrcCommand::Connect {
             destination_hash,
@@ -101,7 +106,7 @@ async fn handle_command(client: &RrcClient, database: &Database, command: RrcCom
         } => {
             let result = match client.connect(destination_hash, nick.as_deref()).await {
                 Ok(hub) => {
-                    let view = hub_view(hub);
+                    let view = hub_view(hub, source);
                     if let Err(error) = database.save_rrc_hub(
                         &view.destination_hash,
                         view.name.as_deref(),
@@ -236,10 +241,10 @@ async fn handle_command(client: &RrcClient, database: &Database, command: RrcCom
     }
 }
 
-fn forward_event(state: &std::sync::Arc<AppState>, event: Event) {
+fn forward_event(state: &std::sync::Arc<AppState>, source: [u8; 16], event: Event) {
     let event = match event {
         Event::HubChanged(hub) => {
-            let view = hub_view(hub);
+            let view = hub_view(hub, source);
             if !view.connected
                 && matches!(
                     state.database.is_rrc_hub_saved(&view.destination_hash),
@@ -270,10 +275,11 @@ fn forward_event(state: &std::sync::Arc<AppState>, event: Event) {
     }
 }
 
-fn hub_view(hub: Hub) -> RrcHubView {
+fn hub_view(hub: Hub, source: [u8; 16]) -> RrcHubView {
     let welcome = hub.welcome.as_ref();
     RrcHubView {
         destination_hash: hex::encode(hub.destination_hash),
+        local_identity: hex::encode(source),
         name: hub.name,
         version: welcome.and_then(|value| value.version.clone()),
         supports_resources: welcome.is_some_and(|value| value.capabilities.resource_envelope),

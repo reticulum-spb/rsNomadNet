@@ -67,6 +67,23 @@ function markRrcRoomRead(hubHash, room) {
   if (hubHash && room) state.rrc.unreadRooms.delete(rrcRoomKey(hubHash, room));
 }
 
+function stageRrcCommand(command) {
+  const input = $("#rrc-body");
+  input.value = command;
+  input.focus();
+  input.setSelectionRange(command.length, command.length);
+}
+
+function rrcTool(label, command, options = {}) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.textContent = label;
+  button.title = options.title || command;
+  button.classList.toggle("danger", Boolean(options.danger));
+  button.addEventListener("click", () => stageRrcCommand(command));
+  return button;
+}
+
 function renderConversations() {
   const container = $("#conversation-list");
   if (!state.conversations.length) {
@@ -471,7 +488,12 @@ function renderRrc() {
     button.className = "rrc-hub-item";
     button.classList.toggle("active", hub.destination_hash === state.rrc.activeHub);
     button.classList.toggle("disconnected", !hub.connected);
-    button.textContent = `${hub.name || shortHash(hub.destination_hash)} · ${hub.detail}`;
+    const unread = hub.rooms.reduce(
+      (total, room) => total + (state.rrc.unreadRooms.get(rrcRoomKey(hub.destination_hash, room)) || 0),
+      0,
+    );
+    button.classList.toggle("unread", unread > 0);
+    button.textContent = `${hub.name || shortHash(hub.destination_hash)}${unread ? ` (${unread})` : ""} · ${hub.detail}`;
     button.title = [
       hub.version ? `version ${hub.version}` : null,
       hub.supports_resources ? "Resources" : null,
@@ -561,6 +583,52 @@ function renderRrc() {
       ? `${available.length} registered public room${available.length === 1 ? "" : "s"}`
       : "No registered public rooms. Joined ad-hoc rooms are not published; a founder can use /register <room>.";
   $("#rrc-list-status").textContent = [roomStateText, directoryText].filter(Boolean).join("\n");
+  const roomTools = [];
+  if (state.rrc.activeRoom) {
+    const room = state.rrc.activeRoom;
+    const modes = roomState?.modes || "";
+    const topic = document.createElement("button");
+    topic.type = "button";
+    topic.textContent = "Topic";
+    topic.title = "Prepare a /topic command";
+    topic.addEventListener("click", () => {
+      const value = window.prompt("New room topic", roomState?.topic || "");
+      if (value?.trim()) stageRrcCommand(`/topic ${room} ${value.trim()}`);
+    });
+    roomTools.push(topic);
+    for (const [mode, title] of [
+      ["m", "Moderated"],
+      ["i", "Invite only"],
+      ["t", "Only operators can change topic"],
+      ["n", "No messages from outside"],
+      ["p", "Private"],
+    ]) {
+      const enabled = modes.includes(mode);
+      roomTools.push(rrcTool(
+        `${enabled ? "−" : "+"}${mode}`,
+        `/mode ${room} ${enabled ? "-" : "+"}${mode}`,
+        { title },
+      ));
+    }
+    if (modes.includes("k")) {
+      roomTools.push(rrcTool("−k", `/mode ${room} -k`, { title: "Remove room key" }));
+    } else {
+      const key = document.createElement("button");
+      key.type = "button";
+      key.textContent = "+k";
+      key.title = "Set room key";
+      key.addEventListener("click", () => {
+        const value = window.prompt("New room key");
+        if (value) stageRrcCommand(`/mode ${room} +k ${value}`);
+      });
+      roomTools.push(key);
+    }
+    roomTools.push(rrcTool(
+      roomState?.registered ? "Unregister" : "Register",
+      `/${roomState?.registered ? "unregister" : "register"} ${room}`,
+    ));
+  }
+  $("#rrc-room-tools").replaceChildren(...roomTools);
   const visible = state.rrc.messages.filter((message) =>
     message.hub_hash === state.rrc.activeHub
       && (!state.rrc.activeRoom || message.room === state.rrc.activeRoom));
@@ -568,9 +636,20 @@ function renderRrc() {
   messageList.replaceChildren(...visible.map((message) => {
     const line = document.createElement("p");
     line.className = `rrc-message-${message.kind}`;
+    line.classList.toggle(
+      "own",
+      Boolean(activeHub?.local_identity) && message.source_hash === activeHub.local_identity,
+    );
+    const time = document.createElement("time");
+    time.dateTime = new Date(message.timestamp_ms).toISOString();
+    time.textContent = new Date(message.timestamp_ms).toLocaleTimeString([], {
+      hour: "2-digit",
+      minute: "2-digit",
+    });
     const nick = document.createElement("strong");
     nick.textContent = message.nick || shortHash(message.source_hash);
     line.append(
+      time,
       document.createTextNode(message.kind === "action" ? "* " : ""),
       nick,
       document.createTextNode(` ${message.body}`),
@@ -586,7 +665,16 @@ function renderRrc() {
     name.textContent = user.nick || shortHash(user.identity);
     const identity = document.createElement("small");
     identity.textContent = user.identity;
-    item.append(name, identity);
+    const actions = document.createElement("div");
+    actions.className = "rrc-user-actions";
+    const target = user.identity;
+    actions.append(
+      rrcTool("+Op", `/op ${state.rrc.activeRoom} ${target}`),
+      rrcTool("+Voice", `/voice ${state.rrc.activeRoom} ${target}`),
+      rrcTool("Kick", `/kick ${state.rrc.activeRoom} ${target}`, { danger: true }),
+      rrcTool("Ban", `/ban ${state.rrc.activeRoom} add ${target}`, { danger: true }),
+    );
+    item.append(name, identity, actions);
     return item;
   }) : [Object.assign(document.createElement("div"), {
     className: "empty compact",
@@ -672,13 +760,18 @@ $("#rrc-join").addEventListener("click", async () => {
   if (!state.rrc.activeHub || !room) return;
   const response = await fetch("/api/v1/rrc/join", {
     method: "POST", headers: { "content-type": "application/json" },
-    body: JSON.stringify({ destination_hash: state.rrc.activeHub, room }),
+    body: JSON.stringify({
+      destination_hash: state.rrc.activeHub,
+      room,
+      key: $("#rrc-key").value || null,
+    }),
   });
   const body = await response.json();
   if (!response.ok) {
     $("#rrc-error").textContent = body.error;
   } else {
     state.rrc.activeRoom = room.replace(/^#/, "").toLowerCase();
+    $("#rrc-key").value = "";
     markRrcRoomRead(state.rrc.activeHub, state.rrc.activeRoom);
     loadRrcHistory();
     loadRrcUsers();

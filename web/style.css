@@ -148,12 +148,15 @@ td.offline { color: var(--danger); }
 #rrc-hubs { border-right: 1px solid var(--border); }
 .rrc-hub-item { width: 100%; padding: 14px; color: var(--muted); border: 0; border-bottom: 1px solid var(--border); background: transparent; text-align: left; cursor: pointer; }
 .rrc-hub-item.active { color: var(--accent); background: var(--accent-dim); }
-.rrc-room { display: grid; grid-template-rows: auto auto auto auto minmax(0, 1fr) auto; min-width: 0; min-height: 0; }
+.rrc-hub-item.unread { color: var(--text); font-weight: 700; }
+.rrc-room { display: grid; grid-template-rows: auto auto auto auto auto minmax(0, 1fr) auto; min-width: 0; min-height: 0; }
 .rrc-status { display: flex; align-items: center; gap: 8px; min-height: 31px; padding: 6px 12px; color: var(--muted); border-bottom: 1px solid var(--border); font-size: 12px; }
 .rrc-status .status-dot { width: 7px; height: 7px; border-radius: 50%; background: #59635e; }
 .rrc-status[data-state="connected"] .status-dot { background: var(--accent); box-shadow: 0 0 8px var(--accent); }
 .rrc-status[data-state="disconnected"] .status-dot { background: var(--danger); }
 .rrc-join, .rrc-compose { padding: 12px; border-bottom: 1px solid var(--border); }
+.rrc-join #rrc-room { flex: 1; }
+.rrc-join #rrc-key { width: 130px; }
 .rrc-compose { border-top: 1px solid var(--border); border-bottom: 0; }
 .rrc-rooms { display: flex; gap: 6px; min-height: 43px; padding: 7px 12px; border-bottom: 1px solid var(--border); overflow-x: auto; }
 .rrc-room-tab { padding: 6px 10px; color: var(--muted); border: 1px solid var(--border); border-radius: 999px; background: transparent; white-space: nowrap; cursor: pointer; }
@@ -162,8 +165,14 @@ td.offline { color: var(--danger); }
 .rrc-room-tab.available:not(.active) { border-style: dashed; }
 .rrc-list-status { min-height: 0; padding: 0 12px; color: var(--muted); font-size: 12px; white-space: pre-line; }
 .rrc-list-status:not(:empty) { padding-top: 7px; padding-bottom: 7px; border-bottom: 1px solid var(--border); }
+.rrc-room-tools { display: flex; flex-wrap: wrap; gap: 5px; padding: 0 12px; }
+.rrc-room-tools:not(:empty) { padding-top: 7px; padding-bottom: 7px; border-bottom: 1px solid var(--border); }
+.rrc-room-tools button, .rrc-user-actions button { padding: 4px 7px; color: var(--muted); border: 1px solid var(--border); border-radius: 6px; background: transparent; font-size: 11px; cursor: pointer; }
+.rrc-room-tools button:hover, .rrc-user-actions button:hover { color: var(--accent); border-color: var(--accent); }
 .rrc-messages { min-height: 0; padding: 18px; overflow-y: auto; overscroll-behavior: contain; }
-.rrc-messages p { margin: 0 0 9px; }
+.rrc-messages p { margin: 0 0 9px; padding: 3px 7px; border-left: 2px solid transparent; }
+.rrc-messages p.own { border-left-color: var(--accent); background: var(--accent-dim); }
+.rrc-messages time { margin-right: 7px; color: #59635e; font-size: 10px; }
 .rrc-messages strong { color: var(--accent); }
 .rrc-message-notice { color: var(--muted); }
 .rrc-message-error { color: #ff8a8a; }
@@ -171,6 +180,8 @@ td.offline { color: var(--danger); }
 .rrc-members { padding: 14px; border-left: 1px solid var(--border); overflow-y: auto; }
 .rrc-user { padding: 8px 0; border-bottom: 1px solid var(--border); }
 .rrc-user small { display: block; color: var(--muted); }
+.rrc-user-actions { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; }
+.rrc-user-actions .danger:hover { color: var(--danger); border-color: var(--danger); }
 .feature-placeholder { display: grid; justify-items: center; gap: 7px; min-height: 410px; place-content: center; color: var(--muted); text-align: center; }
 .feature-placeholder > span { color: var(--accent); font-size: 38px; }
 .feature-placeholder h2 { margin: 8px 0 0; color: var(--text); }
