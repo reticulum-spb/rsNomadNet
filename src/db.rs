@@ -6,6 +6,8 @@ use rusqlite::{Connection, params};
 
 use crate::models::{ConversationSummary, DirectoryEntry, MessageView, RrcMessageView};
 
+const RRC_HISTORY_PER_ROOM: usize = 500;
+
 #[derive(Clone)]
 pub struct Database {
     connection: Arc<Mutex<Connection>>,
@@ -294,8 +296,9 @@ impl Database {
 
     pub fn store_rrc_message(&self, message: &RrcMessageView) -> anyhow::Result<()> {
         let timestamp = i64::try_from(message.timestamp_ms).unwrap_or(i64::MAX);
-        let connection = self.connection.lock().expect("database mutex poisoned");
-        connection.execute(
+        let mut connection = self.connection.lock().expect("database mutex poisoned");
+        let transaction = connection.transaction()?;
+        transaction.execute(
             "
             INSERT INTO rrc_messages
                 (hub_hash, room, source_hash, nick, body, timestamp_ms, kind)
@@ -311,6 +314,22 @@ impl Database {
                 message.kind,
             ],
         )?;
+        transaction.execute(
+            "
+            DELETE FROM rrc_messages
+            WHERE hub_hash = ?1
+              AND room IS ?2
+              AND id NOT IN (
+                SELECT id
+                FROM rrc_messages
+                WHERE hub_hash = ?1 AND room IS ?2
+                ORDER BY timestamp_ms DESC, id DESC
+                LIMIT ?3
+              )
+            ",
+            params![message.hub_hash, message.room, RRC_HISTORY_PER_ROOM as i64],
+        )?;
+        transaction.commit()?;
         Ok(())
     }
 
@@ -593,6 +612,34 @@ mod tests {
                 .is_empty()
         );
         assert_eq!(database.rrc_messages("aa", Some("bots")).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn prunes_rrc_history_per_hub_and_room() {
+        let database = Database::open(Path::new(":memory:")).unwrap();
+        for timestamp_ms in 0..(RRC_HISTORY_PER_ROOM as u64 + 7) {
+            database
+                .store_rrc_message(&RrcMessageView {
+                    hub_hash: "aa".into(),
+                    room: Some("rust".into()),
+                    source_hash: "bb".into(),
+                    nick: Some("alice".into()),
+                    body: timestamp_ms.to_string(),
+                    timestamp_ms,
+                    kind: "message".into(),
+                })
+                .unwrap();
+        }
+        let messages = database.rrc_messages("aa", Some("rust")).unwrap();
+        assert_eq!(messages.len(), RRC_HISTORY_PER_ROOM);
+        assert_eq!(messages.first().unwrap().body, "7");
+        let stored: i64 = database
+            .connection
+            .lock()
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM rrc_messages", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(stored, RRC_HISTORY_PER_ROOM as i64);
     }
 
     #[test]
