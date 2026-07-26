@@ -63,8 +63,12 @@ The current development slice provides:
 - RRC connect, disconnect, room lifecycle, history API and a compact web chat
   interface with hubs in the navigation tree and per-room drafts;
 - typed RRC public-room and room-member discovery via LIST/WHO;
+- coalesced RRC LIST, per-room WHO, and PING requests with visible loading,
+  empty-result, failure, and timeout states;
 - live structured RRC room topics, registration state, and modes with
   backwards-compatible fallback for hubs that do not advertise them;
+- dependency-free RRC UI regression tests for delayed room replies, multi-hub
+  unread isolation, room selection, and hub removal;
 - explicit module boundaries for LXMF conversations, remote-page browsing,
   and RRC;
 - a versioned HTTP API and WebSocket event stream.

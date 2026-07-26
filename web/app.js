@@ -14,7 +14,8 @@ const state = {
   rrc: {
     hubs: new Map(), activeHub: null, activeRoom: null, messages: [],
     availableRooms: new Map(), roomListsLoaded: new Set(), usersByRoom: new Map(),
-    unreadRooms: new Map(),
+    unreadRooms: new Map(), roomQueryState: new Map(), userQueryState: new Map(),
+    pingingHubs: new Set(),
   },
 };
 
@@ -65,9 +66,7 @@ function shortHash(hash) {
   return `${hash.slice(0, 8)}…${hash.slice(-6)}`;
 }
 
-function rrcRoomKey(hubHash, room) {
-  return `${hubHash}:${room}`;
-}
+const rrcRoomKey = RrcUiState.roomKey;
 
 function markRrcRoomRead(hubHash, room) {
   if (hubHash && room) state.rrc.unreadRooms.delete(rrcRoomKey(hubHash, room));
@@ -251,21 +250,42 @@ async function handleLocalRrcCommand(text) {
     return true;
   }
   if (command === "/ping") {
-    const response = await fetch("/api/v1/rrc/ping", {
-      method: "POST", headers: { "content-type": "application/json" },
-      body: JSON.stringify({ destination_hash: state.rrc.activeHub }),
-    });
-    const body = await response.json();
-    state.rrc.messages.push({
-      hub_hash: state.rrc.activeHub,
-      room: state.rrc.activeRoom,
-      source_hash: "",
-      nick: "rsNomadNet",
-      body: response.ok ? `Ping: ${body.milliseconds} ms` : `Ping failed: ${body.error}`,
-      timestamp_ms: Date.now(),
-      kind: response.ok ? "notice" : "error",
-    });
-    renderRrc();
+    if (state.rrc.pingingHubs.has(state.rrc.activeHub)) {
+      $("#rrc-error").textContent = "Ping already in progress";
+      return true;
+    }
+    const hubHash = state.rrc.activeHub;
+    state.rrc.pingingHubs.add(hubHash);
+    $("#rrc-list-status").textContent = "Pinging hub…";
+    try {
+      const response = await fetch("/api/v1/rrc/ping", {
+        method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ destination_hash: hubHash }),
+      });
+      const body = await response.json();
+      state.rrc.messages.push({
+        hub_hash: hubHash,
+        room: state.rrc.activeRoom,
+        source_hash: "",
+        nick: "rsNomadNet",
+        body: response.ok ? `Ping: ${body.milliseconds} ms` : `Ping failed: ${body.error}`,
+        timestamp_ms: Date.now(),
+        kind: response.ok ? "notice" : "error",
+      });
+    } catch (error) {
+      state.rrc.messages.push({
+        hub_hash: hubHash,
+        room: state.rrc.activeRoom,
+        source_hash: "",
+        nick: "rsNomadNet",
+        body: `Ping failed: ${error.message}`,
+        timestamp_ms: Date.now(),
+        kind: "error",
+      });
+    } finally {
+      state.rrc.pingingHubs.delete(hubHash);
+      renderRrc();
+    }
     return true;
   }
   return false;
@@ -976,17 +996,19 @@ function connectEvents() {
         const users = state.rrc.usersByRoom.get(
           rrcRoomKey(message.payload.hub_hash, message.payload.room),
         ) || [];
-        const user = users.find(
-          (candidate) => candidate.identity === message.payload.source_hash,
+        RrcUiState.updateUserNick(
+          users,
+          message.payload.source_hash,
+          message.payload.nick,
         );
-        if (user) user.nick = message.payload.nick;
       }
-      if (message.payload.room
-          && (message.payload.hub_hash !== state.rrc.activeHub
-            || message.payload.room !== state.rrc.activeRoom)) {
-        const key = rrcRoomKey(message.payload.hub_hash, message.payload.room);
-        state.rrc.unreadRooms.set(key, (state.rrc.unreadRooms.get(key) || 0) + 1);
-      }
+      RrcUiState.incrementUnread(
+        state.rrc.unreadRooms,
+        message.payload.hub_hash,
+        message.payload.room,
+        state.rrc.activeHub,
+        state.rrc.activeRoom,
+      );
       renderRrc();
       if (message.payload.hub_hash === state.rrc.activeHub
           && message.payload.room === state.rrc.activeRoom
@@ -1013,7 +1035,7 @@ $$(".nav-item").forEach((button) => {
 $("#directory-filters").addEventListener("change", renderDirectory);
 
 function renderRrc() {
-  const hubs = [...state.rrc.hubs.values()].filter((hub) => hub.connected);
+  const hubs = RrcUiState.visibleHubs([...state.rrc.hubs.values()]);
   const hubItems = hubs.map((hub) => {
     const button = document.createElement("button");
     button.className = "rrc-hub-item";
@@ -1038,7 +1060,7 @@ function renderRrc() {
     button.addEventListener("click", () => {
       switchView("rrc");
       state.rrc.activeHub = hub.destination_hash;
-      if (!hub.rooms.includes(state.rrc.activeRoom)) state.rrc.activeRoom = hub.rooms[0] || null;
+      state.rrc.activeRoom = RrcUiState.selectRoom(hub.rooms, state.rrc.activeRoom);
       markRrcRoomRead(state.rrc.activeHub, state.rrc.activeRoom);
       renderRrc();
       loadRrcHistory();
@@ -1049,9 +1071,7 @@ function renderRrc() {
   $("#rrc-hubs").replaceChildren(...hubItems);
   const activeHub = state.rrc.hubs.get(state.rrc.activeHub);
   const rooms = activeHub?.rooms || [];
-  if (state.rrc.activeRoom && !rooms.includes(state.rrc.activeRoom)) {
-    state.rrc.activeRoom = rooms[0] || null;
-  }
+  state.rrc.activeRoom = RrcUiState.selectRoom(rooms, state.rrc.activeRoom);
   const rrcStatus = $("#rrc-status");
   rrcStatus.dataset.state = activeHub
     ? (activeHub.connected ? "connected" : "disconnected")
@@ -1067,6 +1087,9 @@ function renderRrc() {
   for (const selector of ["#rrc-part", "#rrc-who"]) {
     $(selector).disabled = !activeRoomActionsEnabled;
   }
+  $("#rrc-list").disabled ||= state.rrc.roomQueryState.get(state.rrc.activeHub)?.state === "loading";
+  const activeUserKey = rrcRoomKey(state.rrc.activeHub, state.rrc.activeRoom);
+  $("#rrc-who").disabled ||= state.rrc.userQueryState.get(activeUserKey)?.state === "loading";
   $("#rrc-body").disabled = !roomActionsEnabled;
   $("#rrc-compose button").disabled = !roomActionsEnabled;
   $("#rrc-body").placeholder = state.rrc.activeRoom
@@ -1107,12 +1130,17 @@ function renderRrc() {
   }
   $("#rrc-rooms").replaceChildren(...roomButtons);
   const listLoaded = state.rrc.roomListsLoaded.has(state.rrc.activeHub);
+  const roomQuery = state.rrc.roomQueryState.get(state.rrc.activeHub);
   const roomState = activeHub?.room_states?.find((room) => room.name === state.rrc.activeRoom);
   const roomStateText = roomState
     ? `#${roomState.name} · ${roomState.registered ? "registered" : "unregistered"} · mode ${roomState.modes}${roomState.topic ? ` · ${roomState.topic}` : ""}`
     : "";
-  const directoryText = !listLoaded
-    ? ""
+  const directoryText = roomQuery?.state === "loading"
+    ? "Loading public rooms…"
+    : roomQuery?.state === "error"
+      ? `Room discovery failed: ${roomQuery.error}`
+      : !listLoaded
+        ? ""
     : available.length
       ? `${available.length} registered public room${available.length === 1 ? "" : "s"}`
       : "No registered public rooms. Joined ad-hoc rooms are not published; a founder can use /register <room>.";
@@ -1204,9 +1232,18 @@ function renderRrc() {
     return line;
   }));
   messageList.scrollTop = messageList.scrollHeight;
-  const users = state.rrc.usersByRoom.get(
-    rrcRoomKey(state.rrc.activeHub, state.rrc.activeRoom),
-  ) || [];
+  const userKey = rrcRoomKey(state.rrc.activeHub, state.rrc.activeRoom);
+  const users = state.rrc.usersByRoom.get(userKey) || [];
+  const userQuery = state.rrc.userQueryState.get(userKey);
+  const emptyUserText = !state.rrc.activeRoom
+    ? "Select a room"
+    : userQuery?.state === "loading"
+      ? "Loading users…"
+      : userQuery?.state === "error"
+        ? `User discovery failed: ${userQuery.error}`
+        : userQuery?.state === "loaded"
+          ? "No users in this room"
+          : "Users not loaded";
   $("#rrc-users").replaceChildren(...(users.length ? users.map((user) => {
     const item = document.createElement("div");
     item.className = "rrc-user";
@@ -1234,7 +1271,7 @@ function renderRrc() {
     return item;
   }) : [Object.assign(document.createElement("div"), {
     className: "empty compact",
-    textContent: state.rrc.activeRoom ? "No users reported" : "Select a room",
+    textContent: emptyUserText,
   })]));
 }
 
@@ -1260,17 +1297,23 @@ async function loadRrcHistory() {
 async function loadRrcRooms() {
   if (!state.rrc.activeHub) return;
   const hubHash = state.rrc.activeHub;
-  const response = await fetch("/api/v1/rrc/list", {
-    method: "POST", headers: { "content-type": "application/json" },
-    body: JSON.stringify({ destination_hash: hubHash }),
-  });
-  const body = await response.json();
-  if (!response.ok) {
-    $("#rrc-error").textContent = body.error;
-    return;
+  if (state.rrc.roomQueryState.get(hubHash)?.state === "loading") return;
+  state.rrc.roomQueryState.set(hubHash, { state: "loading" });
+  renderRrc();
+  try {
+    const response = await fetch("/api/v1/rrc/list", {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ destination_hash: hubHash }),
+    });
+    const body = await response.json();
+    if (!response.ok) throw new Error(body.error || "Room discovery failed");
+    state.rrc.availableRooms.set(hubHash, body);
+    state.rrc.roomListsLoaded.add(hubHash);
+    state.rrc.roomQueryState.set(hubHash, { state: "loaded" });
+  } catch (error) {
+    state.rrc.roomQueryState.set(hubHash, { state: "error", error: error.message });
+    $("#rrc-error").textContent = error.message;
   }
-  state.rrc.availableRooms.set(hubHash, body);
-  state.rrc.roomListsLoaded.add(hubHash);
   renderRrc();
 }
 
@@ -1281,20 +1324,32 @@ async function loadRrcUsers() {
   }
   const hubHash = state.rrc.activeHub;
   const room = state.rrc.activeRoom;
-  const response = await fetch("/api/v1/rrc/who", {
-    method: "POST", headers: { "content-type": "application/json" },
-    body: JSON.stringify({
-      destination_hash: hubHash,
-      room,
-    }),
-  });
-  const body = await response.json();
-  if (!response.ok) {
-    $("#rrc-error").textContent = body.error;
-    return;
+  const key = rrcRoomKey(hubHash, room);
+  if (state.rrc.userQueryState.get(key)?.state === "loading") return;
+  state.rrc.userQueryState.set(key, { state: "loading" });
+  renderRrc();
+  try {
+    const response = await fetch("/api/v1/rrc/who", {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        destination_hash: hubHash,
+        room,
+      }),
+    });
+    const body = await response.json();
+    if (!response.ok) throw new Error(body.error || "User discovery failed");
+    state.rrc.usersByRoom.set(key, body);
+    state.rrc.userQueryState.set(key, { state: "loaded" });
+  } catch (error) {
+    state.rrc.userQueryState.set(key, { state: "error", error: error.message });
+    $("#rrc-error").textContent = error.message;
   }
-  state.rrc.usersByRoom.set(rrcRoomKey(hubHash, room), body);
-  if (hubHash !== state.rrc.activeHub || room !== state.rrc.activeRoom) return;
+  if (!RrcUiState.isCurrentRoom(
+    hubHash,
+    room,
+    state.rrc.activeHub,
+    state.rrc.activeRoom,
+  )) return;
   renderRrc();
 }
 
@@ -1380,8 +1435,15 @@ $("#rrc-disconnect").addEventListener("click", async () => {
   for (const key of state.rrc.unreadRooms.keys()) {
     if (key.startsWith(`${destinationHash}:`)) state.rrc.unreadRooms.delete(key);
   }
-  state.rrc.activeHub = state.rrc.hubs.keys().next().value || null;
-  state.rrc.activeRoom = state.rrc.hubs.get(state.rrc.activeHub)?.rooms[0] || null;
+  state.rrc.activeHub = RrcUiState.nextHub(
+    [...state.rrc.hubs.keys()],
+    destinationHash,
+    state.rrc.activeHub,
+  );
+  state.rrc.activeRoom = RrcUiState.selectRoom(
+    state.rrc.hubs.get(state.rrc.activeHub)?.rooms || [],
+    state.rrc.activeRoom,
+  );
   renderRrc();
 });
 $("#rrc-compose").addEventListener("submit", async (event) => {

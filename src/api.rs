@@ -16,12 +16,14 @@ use crate::models::{SendMessageRequest, ServerEvent};
 
 const INDEX: &str = include_str!("../web/index.html");
 const APP_JS: &str = include_str!("../web/app.js");
+const RRC_UI_JS: &str = include_str!("../web/rrc-ui.js");
 const STYLE_CSS: &str = include_str!("../web/style.css");
 
 pub fn router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/", get(index))
         .route("/app.js", get(app_js))
+        .route("/rrc-ui.js", get(rrc_ui_js))
         .route("/style.css", get(style_css))
         .route("/api/v1/health", get(health))
         .route("/api/v1/state", get(snapshot))
@@ -633,6 +635,13 @@ async fn app_js() -> impl IntoResponse {
     (
         [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
         APP_JS,
+    )
+}
+
+async fn rrc_ui_js() -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
+        RRC_UI_JS,
     )
 }
 
