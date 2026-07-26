@@ -77,6 +77,16 @@ pub struct DownloadedFile {
     pub bytes: Vec<u8>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct BrowserCacheEntry {
+    pub url: String,
+    pub content_hash: String,
+    pub size_bytes: u64,
+    pub expires_at: Option<i64>,
+    pub stored_at: i64,
+    pub expired: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum MicronBlock {

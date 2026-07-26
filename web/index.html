@@ -122,7 +122,9 @@
           <button class="browser-control" id="browser-back" disabled aria-label="Back">←</button>
           <button class="browser-control" id="browser-forward" disabled aria-label="Forward">→</button>
           <button class="browser-control" id="browser-reload" disabled aria-label="Reload">↻</button>
+          <button class="browser-control" id="browser-stop" hidden aria-label="Cancel request">×</button>
           <input id="browser-address" aria-label="NomadNet address" placeholder="destination_hash:/page/index.mu">
+          <button class="browser-control" id="browser-cache" aria-label="Browser cache" title="Browser cache">▤</button>
           <button id="browser-go">Go</button>
         </div>
         <div class="browser-status" id="browser-status"></div>
@@ -216,6 +218,21 @@
       <div class="dialog-actions">
         <button type="button" class="secondary" id="cancel-rrc-connect">Cancel</button>
         <button type="submit" class="primary" id="rrc-connect">Connect</button>
+      </div>
+    </form>
+  </dialog>
+  <dialog id="browser-cache-dialog">
+    <form method="dialog">
+      <div class="dialog-heading">
+        <div><span class="eyebrow">NomadNet browser</span><h2>Page cache</h2></div>
+        <button class="icon-button" value="close" aria-label="Close">×</button>
+      </div>
+      <div class="browser-cache-summary" id="browser-cache-summary"></div>
+      <div class="browser-cache-list" id="browser-cache-list"></div>
+      <p class="form-error" id="browser-cache-error" role="alert"></p>
+      <div class="dialog-actions">
+        <button type="button" class="danger secondary" id="clear-browser-cache">Clear cache</button>
+        <button class="secondary" value="close">Close</button>
       </div>
     </form>
   </dialog>

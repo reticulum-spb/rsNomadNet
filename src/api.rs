@@ -31,6 +31,10 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/v1/messages", post(send_message))
         .route("/api/v1/browser/fetch", post(fetch_page))
         .route("/api/v1/browser/download", post(download_file))
+        .route(
+            "/api/v1/browser/cache",
+            get(browser_cache).delete(clear_browser_cache),
+        )
         .route("/api/v1/rrc/connect", post(rrc_connect))
         .route("/api/v1/rrc/disconnect", post(rrc_disconnect))
         .route("/api/v1/rrc/nick", post(rrc_nick))
@@ -511,6 +515,20 @@ async fn download_file(
     }
 }
 
+async fn browser_cache(State(state): State<Arc<AppState>>) -> Response {
+    match state.database.browser_cache_entries(unix_seconds()) {
+        Ok(entries) => Json(json!(entries)).into_response(),
+        Err(error) => internal_error(error),
+    }
+}
+
+async fn clear_browser_cache(State(state): State<Arc<AppState>>) -> Response {
+    match state.database.clear_browser_cache() {
+        Ok(deleted) => Json(json!({"deleted": deleted})).into_response(),
+        Err(error) => internal_error(error),
+    }
+}
+
 async fn index() -> Html<&'static str> {
     Html(INDEX)
 }
@@ -781,6 +799,14 @@ fn parse_hash(value: &str) -> Result<[u8; 16], hex::FromHexError> {
     let mut output = [0u8; 16];
     hex::decode_to_slice(value, &mut output)?;
     Ok(output)
+}
+
+fn unix_seconds() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+        .min(i64::MAX as u64) as i64
 }
 
 fn internal_error(error: anyhow::Error) -> Response {

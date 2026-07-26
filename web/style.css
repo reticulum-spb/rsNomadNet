@@ -123,6 +123,13 @@ td.offline { color: var(--danger); }
 .address-bar button { padding: 0 22px; border: 0; border-radius: 7px; background: var(--accent); color: #10140c; font-weight: 700; }
 .address-bar .browser-control { flex: 0 0 40px; padding: 0; color: var(--text); border: 1px solid var(--border); background: #090c0b; font-size: 17px; }
 .browser-status { min-height: 30px; padding: 9px 4px; color: var(--muted); font-size: 11px; }
+.browser-cache-summary { color: var(--muted); font-size: 12px; }
+.browser-cache-list { max-height: 360px; border: 1px solid var(--border); border-radius: 8px; overflow-y: auto; }
+.browser-cache-entry { display: grid; gap: 4px; padding: 10px 12px; border-bottom: 1px solid var(--border); }
+.browser-cache-entry:last-child { border-bottom: 0; }
+.browser-cache-entry code { overflow: hidden; color: var(--text); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+.browser-cache-entry span { color: var(--muted); font-size: 10px; }
+.browser-error { min-height: 360px; border: 1px dashed var(--danger); border-radius: 9px; }
 .browser-page {
   min-height: 410px;
   padding: clamp(22px, 4vw, 52px);

@@ -127,6 +127,7 @@ async fn run(state: Arc<AppState>) -> anyhow::Result<()> {
         .identity()
         .get_private_key()
         .ok_or_else(|| anyhow::anyhow!("local identity has no private key"))?;
+    let browser_private_key = *rrc_private_key;
     let rrc_task = crate::rrc::spawn(
         state.clone(),
         runtime.clone(),
@@ -200,16 +201,29 @@ async fn run(state: Arc<AppState>) -> anyhow::Result<()> {
                         let _ = response.send(result);
                     }
                     NetworkCommand::FetchPage { url, reload, fields, response } => {
-                        let result = fetch_page(&state, &runtime, &delivery, &url, reload, &fields)
+                        let state = state.clone();
+                        let runtime = runtime.clone();
+                        tokio::spawn(async move {
+                            let result = async {
+                                let identity = Identity::from_private_key(&browser_private_key)?;
+                                fetch_page(&state, &runtime, &identity, &url, reload, &fields).await
+                            }
                             .await
-                            .map_err(|error| error.to_string());
-                        let _ = response.send(result);
+                            .map_err(|error: anyhow::Error| error.to_string());
+                            let _ = response.send(result);
+                        });
                     }
                     NetworkCommand::FetchFile { url, response } => {
-                        let result = fetch_file(&runtime, &delivery, &url)
+                        let runtime = runtime.clone();
+                        tokio::spawn(async move {
+                            let result = async {
+                                let identity = Identity::from_private_key(&browser_private_key)?;
+                                fetch_file(&runtime, &identity, &url).await
+                            }
                             .await
-                            .map_err(|error| error.to_string());
-                        let _ = response.send(result);
+                            .map_err(|error: anyhow::Error| error.to_string());
+                            let _ = response.send(result);
+                        });
                     }
                 }
             }
@@ -298,7 +312,7 @@ async fn run(state: Arc<AppState>) -> anyhow::Result<()> {
 async fn fetch_page(
     state: &Arc<AppState>,
     runtime: &reticulum::ReticulumHandle,
-    delivery: &DeliveryIdentity,
+    identity: &Identity,
     url: &NomadUrl,
     reload: bool,
     fields: &BTreeMap<String, String>,
@@ -320,7 +334,7 @@ async fn fetch_page(
     } else {
         Some(encode_form_fields(fields)?)
     };
-    let response = request_node(runtime, delivery, url, request_data.as_deref()).await?;
+    let response = request_node(runtime, identity, url, request_data.as_deref()).await?;
     let page = parse_page(canonical.clone(), &response, false)?;
     if fields.is_empty() {
         state
@@ -332,13 +346,13 @@ async fn fetch_page(
 
 async fn fetch_file(
     runtime: &reticulum::ReticulumHandle,
-    delivery: &DeliveryIdentity,
+    identity: &Identity,
     url: &NomadUrl,
 ) -> anyhow::Result<DownloadedFile> {
     if !url.is_file() {
         anyhow::bail!("file request requires a /file/ path");
     }
-    let bytes = request_node(runtime, delivery, url, None).await?;
+    let bytes = request_node(runtime, identity, url, None).await?;
     if bytes.len() > 64 * 1024 * 1024 {
         anyhow::bail!("download exceeds the 64 MiB client limit");
     }
@@ -363,7 +377,7 @@ async fn fetch_file(
 
 async fn request_node(
     runtime: &reticulum::ReticulumHandle,
-    delivery: &DeliveryIdentity,
+    identity: &Identity,
     url: &NomadUrl,
     request_data: Option<&[u8]>,
 ) -> anyhow::Result<Vec<u8>> {
@@ -376,14 +390,9 @@ async fn request_node(
     runtime
         .await_path(url.destination_hash, Duration::from_secs(30))
         .await?;
-    let private_key = delivery
-        .identity()
-        .get_private_key()
-        .ok_or_else(|| anyhow::anyhow!("local identity has no private key"))?;
-    let link_identity = Identity::from_private_key(private_key.as_ref())?;
     let mut link = LinkSession::open(
         runtime,
-        link_identity,
+        identity.clone(),
         url.destination_hash,
         1,
         Duration::from_secs(30),

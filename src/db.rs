@@ -4,6 +4,7 @@ use std::sync::{Arc, Mutex};
 use anyhow::Context;
 use rusqlite::{Connection, params};
 
+use crate::browser::BrowserCacheEntry;
 use crate::models::{ConversationSummary, DirectoryEntry, MessageView, RrcMessageView};
 
 const RRC_HISTORY_PER_ROOM: usize = 500;
@@ -469,6 +470,36 @@ impl Database {
         Ok(())
     }
 
+    pub fn browser_cache_entries(&self, now: i64) -> anyhow::Result<Vec<BrowserCacheEntry>> {
+        let connection = self.connection.lock().expect("database mutex poisoned");
+        let mut statement = connection.prepare(
+            "
+            SELECT url, content_hash, length(body), expires_at, stored_at
+            FROM browser_cache
+            ORDER BY stored_at DESC, url
+            ",
+        )?;
+        let rows = statement.query_map([], |row| {
+            let expires_at: Option<i64> = row.get(3)?;
+            Ok(BrowserCacheEntry {
+                url: row.get(0)?,
+                content_hash: row.get(1)?,
+                size_bytes: row.get::<_, i64>(2)?.max(0) as u64,
+                expires_at,
+                stored_at: row.get(4)?,
+                expired: expires_at.is_some_and(|value| value <= now),
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    pub fn clear_browser_cache(&self) -> anyhow::Result<usize> {
+        let connection = self.connection.lock().expect("database mutex poisoned");
+        connection
+            .execute("DELETE FROM browser_cache", [])
+            .map_err(Into::into)
+    }
+
     pub fn conversations(&self) -> anyhow::Result<Vec<ConversationSummary>> {
         let connection = self.connection.lock().expect("database mutex poisoned");
         let mut statement = connection.prepare(
@@ -897,6 +928,12 @@ mod tests {
             database.cached_page("node:/page/index.mu", 160).unwrap(),
             None
         );
+        let entries = database.browser_cache_entries(160).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].size_bytes, 6);
+        assert!(entries[0].expired);
+        assert_eq!(database.clear_browser_cache().unwrap(), 1);
+        assert!(database.browser_cache_entries(160).unwrap().is_empty());
     }
 
     #[test]

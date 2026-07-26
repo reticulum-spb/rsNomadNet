@@ -4,7 +4,10 @@ const state = {
   conversations: [],
   directory: [],
   activeConversation: null,
-  browser: { history: [], position: -1, page: null, partialTimers: [], generation: 0 },
+  browser: {
+    history: [], position: -1, page: null, partialTimers: [], generation: 0,
+    navigationController: null, partialControllers: new Set(),
+  },
   rrc: {
     hubs: new Map(), activeHub: null, activeRoom: null, messages: [],
     availableRooms: new Map(), roomListsLoaded: new Set(), usersByRoom: new Map(),
@@ -358,6 +361,10 @@ function renderInline(parts, parent) {
       link.textContent = part.label;
       applyMicronStyle(link, part.style);
       link.addEventListener("click", () => {
+        if (part.target.startsWith("p:")) {
+          refreshMicronPartials(part.target.slice(2));
+          return;
+        }
         const target = resolveBrowserTarget(part.target);
         if (target.startsWith("#")) {
           const anchor = target.slice(1);
@@ -485,6 +492,9 @@ function renderMicronBlocks(blocks, container, generation) {
       element = document.createElement("div");
       element.className = "micron-partial";
       element.textContent = "Loading partial…";
+      element.micronPartial = block;
+      element.dataset.partialId = (block.fields || [])
+        .find((field) => field.startsWith("pid="))?.slice(4) || "";
       window.setTimeout(() => loadMicronPartial(element, block, generation), 0);
     }
     if (element) {
@@ -501,12 +511,26 @@ function renderMicronBlocks(blocks, container, generation) {
   container.replaceChildren(...elements);
 }
 
+function refreshMicronPartials(partialId) {
+  const partials = [...$("#browser-page").querySelectorAll(".micron-partial")]
+    .filter((element) => !partialId || element.dataset.partialId === partialId);
+  for (const element of partials) {
+    if (element.partialTimer) window.clearTimeout(element.partialTimer);
+    loadMicronPartial(element, element.micronPartial, state.browser.generation);
+  }
+}
+
 async function loadMicronPartial(container, block, generation) {
   if (generation !== state.browser.generation || !container.isConnected) return;
+  container.partialController?.abort();
+  const controller = new AbortController();
+  container.partialController = controller;
+  state.browser.partialControllers.add(controller);
   try {
     const response = await fetch("/api/v1/browser/fetch", {
       method: "POST",
       headers: { "content-type": "application/json" },
+      signal: controller.signal,
       body: JSON.stringify({
         url: resolveBrowserTarget(block.target),
         reload: true,
@@ -522,15 +546,22 @@ async function loadMicronPartial(container, block, generation) {
         () => loadMicronPartial(container, block, generation),
         block.interval_seconds * 1000,
       );
+      container.partialTimer = timer;
       state.browser.partialTimers.push(timer);
     }
   } catch (error) {
+    if (error.name === "AbortError") return;
     container.classList.add("failed");
     container.textContent = error.message;
+  } finally {
+    state.browser.partialControllers.delete(controller);
+    if (container.partialController === controller) container.partialController = null;
   }
 }
 
 function renderBrowserPage(page) {
+  for (const controller of state.browser.partialControllers) controller.abort();
+  state.browser.partialControllers.clear();
   for (const timer of state.browser.partialTimers) window.clearTimeout(timer);
   state.browser.partialTimers = [];
   state.browser.generation += 1;
@@ -543,6 +574,21 @@ function renderBrowserPage(page) {
   renderMicronBlocks(page.blocks, container, state.browser.generation);
   document.title = page.title ? `${page.title} · rsNomadNet` : "rsNomadNet";
   updateBrowserControls();
+}
+
+function renderBrowserError(message, address) {
+  const error = document.createElement("div");
+  error.className = "feature-placeholder browser-error";
+  const icon = document.createElement("span");
+  icon.textContent = "!";
+  const heading = document.createElement("h2");
+  heading.textContent = "Page request failed";
+  const detail = document.createElement("p");
+  detail.textContent = message;
+  const target = document.createElement("code");
+  target.textContent = address;
+  error.append(icon, heading, detail, target);
+  $("#browser-page").replaceChildren(error);
 }
 
 async function downloadBrowserFile(url) {
@@ -583,14 +629,20 @@ function updateBrowserControls() {
 async function navigateBrowser(url, options = {}) {
   const address = url.trim();
   if (!address) return;
+  state.browser.navigationController?.abort();
+  const controller = new AbortController();
+  state.browser.navigationController = controller;
   const go = $("#browser-go");
   go.disabled = true;
   go.textContent = "Loading…";
+  $("#browser-stop").hidden = false;
+  $("#browser-reload").hidden = true;
   $("#browser-status").textContent = "Discovering path and requesting page…";
   try {
     const response = await fetch("/api/v1/browser/fetch", {
       method: "POST",
       headers: { "content-type": "application/json" },
+      signal: controller.signal,
       body: JSON.stringify({
         url: address,
         reload: Boolean(options.reload),
@@ -607,10 +659,17 @@ async function navigateBrowser(url, options = {}) {
     }
     updateBrowserControls();
   } catch (error) {
-    $("#browser-status").textContent = error.message;
+    const message = error.name === "AbortError" ? "Request cancelled" : error.message;
+    $("#browser-status").textContent = message;
+    if (error.name !== "AbortError") renderBrowserError(message, address);
   } finally {
-    go.disabled = false;
-    go.textContent = "Go";
+    if (state.browser.navigationController === controller) {
+      state.browser.navigationController = null;
+      go.disabled = false;
+      go.textContent = "Go";
+      $("#browser-stop").hidden = true;
+      $("#browser-reload").hidden = false;
+    }
   }
 }
 
@@ -1146,6 +1205,7 @@ $("#browser-address").addEventListener("keydown", (event) => {
 $("#browser-reload").addEventListener("click", () => {
   if (state.browser.page) navigateBrowser(state.browser.page.url, { reload: true, historyNavigation: true });
 });
+$("#browser-stop").addEventListener("click", () => state.browser.navigationController?.abort());
 $("#browser-back").addEventListener("click", () => {
   if (state.browser.position <= 0) return;
   state.browser.position -= 1;
@@ -1157,6 +1217,52 @@ $("#browser-forward").addEventListener("click", () => {
   state.browser.position += 1;
   navigateBrowser(state.browser.history[state.browser.position], { historyNavigation: true });
   updateBrowserControls();
+});
+
+const browserCacheDialog = $("#browser-cache-dialog");
+async function loadBrowserCache() {
+  $("#browser-cache-error").textContent = "";
+  const response = await fetch("/api/v1/browser/cache");
+  const body = await response.json();
+  if (!response.ok) throw new Error(body.error || "Could not inspect browser cache");
+  const total = body.reduce((sum, entry) => sum + entry.size_bytes, 0);
+  $("#browser-cache-summary").textContent = `${body.length} page${body.length === 1 ? "" : "s"} · ${formatBytes(total)}`;
+  $("#browser-cache-list").replaceChildren(...(body.length ? body.map((entry) => {
+    const item = document.createElement("div");
+    item.className = "browser-cache-entry";
+    const url = document.createElement("code");
+    url.textContent = entry.url;
+    const detail = document.createElement("span");
+    const expires = entry.expires_at
+      ? new Date(entry.expires_at * 1000).toLocaleString()
+      : "never";
+    detail.textContent = `${formatBytes(entry.size_bytes)} · ${entry.expired ? "expired" : `expires ${expires}`} · ${entry.content_hash.slice(0, 12)}`;
+    item.append(url, detail);
+    return item;
+  }) : [Object.assign(document.createElement("div"), {
+    className: "empty compact",
+    textContent: "Page cache is empty",
+  })]));
+}
+$("#browser-cache").addEventListener("click", async () => {
+  browserCacheDialog.showModal();
+  try {
+    await loadBrowserCache();
+  } catch (error) {
+    $("#browser-cache-error").textContent = error.message;
+  }
+});
+$("#clear-browser-cache").addEventListener("click", async () => {
+  $("#browser-cache-error").textContent = "";
+  try {
+    const response = await fetch("/api/v1/browser/cache", { method: "DELETE" });
+    const body = await response.json();
+    if (!response.ok) throw new Error(body.error || "Could not clear browser cache");
+    await loadBrowserCache();
+    $("#browser-status").textContent = `Cleared ${body.deleted} cached page${body.deleted === 1 ? "" : "s"}`;
+  } catch (error) {
+    $("#browser-cache-error").textContent = error.message;
+  }
 });
 
 $("#message-compose").addEventListener("submit", async (event) => {
