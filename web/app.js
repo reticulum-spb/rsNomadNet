@@ -399,6 +399,30 @@ function resolveBrowserTarget(target) {
   return `${current.slice(0, 32)}${target}`;
 }
 
+async function openLxmfLink(target) {
+  const destinationHash = target.slice(target.indexOf("@") + 1).trim().toLowerCase();
+  if (!/^[0-9a-f]{32}$/.test(destinationHash)) {
+    $("#browser-status").textContent = "LXMF link contains an invalid destination hash";
+    return;
+  }
+  let conversation = state.conversations.find(
+    (item) => item.destination_hash === destinationHash,
+  );
+  if (!conversation) {
+    conversation = {
+      destination_hash: destinationHash,
+      display_name: null,
+      last_message: null,
+      last_activity: null,
+      unread: 0,
+    };
+    state.conversations.unshift(conversation);
+  }
+  switchView("messages");
+  await openConversation(conversation);
+  $("#message-body").focus();
+}
+
 function renderInline(parts, parent) {
   for (const part of parts) {
     if (part.type === "text") {
@@ -412,6 +436,13 @@ function renderInline(parts, parent) {
       link.textContent = part.label;
       applyMicronStyle(link, part.style);
       link.addEventListener("click", () => {
+        if (part.target.toLowerCase().startsWith("lxmf@")) {
+          openLxmfLink(part.target).catch((error) => {
+            switchView("messages");
+            $("#message-compose-error").textContent = error.message;
+          });
+          return;
+        }
         if (part.target.startsWith("p:")) {
           refreshMicronPartials(part.target.slice(2));
           return;

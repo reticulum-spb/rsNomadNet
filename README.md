@@ -34,8 +34,9 @@ The current development slice provides:
   nodes;
 - remote `/page/` requests over Reticulum Link, including Resource responses;
 - a safe Micron-to-AST renderer with nested sections, alignment, inline
-  formatting and colours, links and anchors, styled dividers, preformatted
-  blocks, page colours, table sizing, and cache headers;
+  formatting and colours, page links, `lxmf@` message links and anchors,
+  styled dividers, preformatted blocks, page colours, table sizing, and cache
+  headers;
 - inspectable/clearable page cache, browser history, cancellable navigation,
   retryable error views, and reload;
 - remote `/file/` downloads with single- and multi-segment Resource support,
