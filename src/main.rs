@@ -27,6 +27,14 @@ async fn main() -> anyhow::Result<()> {
     let config = config::AppConfig::from_cli(cli)?;
     let database =
         db::Database::open(&config.database_path).context("could not open application database")?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+        .min(i64::MAX as u64) as i64;
+    database
+        .maintain(now)
+        .context("could not maintain application database")?;
     let state = Arc::new(app::AppState::new(config.clone(), database));
 
     let network_task = network::spawn(state.clone());

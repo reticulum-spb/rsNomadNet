@@ -76,11 +76,11 @@ pub fn spawn(
         let Some(mut commands) = state.rrc_command_rx.lock().await.take() else {
             return;
         };
-        restore_saved_sessions(&state, &client);
+        let mut tasks = tokio::task::JoinSet::new();
+        restore_saved_sessions(&state, &client, &mut tasks);
         loop {
             tokio::select! {
                 _ = state.shutdown.wait() => {
-                    let _ = client.shutdown().await;
                     break;
                 }
                 command = commands.recv() => {
@@ -88,7 +88,7 @@ pub fn spawn(
                     if is_remote_query(&command) {
                         let client = client.clone();
                         let database = state.database.clone();
-                        tokio::spawn(async move {
+                        tasks.spawn(async move {
                             handle_command(&client, &database, source, command).await;
                         });
                     } else {
@@ -104,8 +104,18 @@ pub fn spawn(
                         Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                     }
                 }
+                completed = tasks.join_next(), if !tasks.is_empty() => {
+                    if let Some(Err(error)) = completed
+                        && !error.is_cancelled()
+                    {
+                        tracing::warn!(%error, "RRC adapter task failed");
+                    }
+                }
             }
         }
+        tasks.abort_all();
+        while tasks.join_next().await.is_some() {}
+        let _ = client.shutdown().await;
     })
 }
 
@@ -327,6 +337,11 @@ fn forward_event(state: &std::sync::Arc<AppState>, source: [u8; 16], event: Even
         Event::Resource(_) => None,
         Event::InvalidEnvelope { hub, error } => {
             tracing::warn!(hub = %hex::encode(hub), %error, "invalid RRC envelope");
+            let _ = state.database.record_operational_error(
+                "rrc.envelope",
+                &format!("{}: {error}", hex::encode(hub)),
+                unix_seconds(),
+            );
             None
         }
     };
@@ -383,7 +398,11 @@ fn message_view(message: Message) -> RrcMessageView {
     }
 }
 
-fn restore_saved_sessions(state: &std::sync::Arc<AppState>, client: &RrcClient) {
+fn restore_saved_sessions(
+    state: &std::sync::Arc<AppState>,
+    client: &RrcClient,
+    tasks: &mut tokio::task::JoinSet<()>,
+) {
     let saved = match state.database.saved_rrc_hubs() {
         Ok(saved) => saved,
         Err(error) => {
@@ -401,7 +420,7 @@ fn restore_saved_sessions(state: &std::sync::Arc<AppState>, client: &RrcClient) 
             continue;
         };
         let client = client.clone();
-        tokio::spawn(async move {
+        tasks.spawn(async move {
             match client.connect(destination, hub.nick.as_deref()).await {
                 Ok(_) => {
                     if let Err(error) = client

@@ -1,5 +1,6 @@
 /target
+/.venv
+__pycache__/
 /.rsnomadnet
 *.db-shm
 *.db-wal
-

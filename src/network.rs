@@ -66,6 +66,11 @@ pub fn spawn(state: Arc<AppState>) -> Option<tokio::task::JoinHandle<()>> {
     Some(tokio::spawn(async move {
         if let Err(error) = run(state.clone()).await {
             tracing::error!(%error, "Reticulum service stopped");
+            let _ = state.database.record_operational_error(
+                "network",
+                &error.to_string(),
+                now_f64() as i64,
+            );
             state
                 .set_network(NetworkSnapshot {
                     state: NetworkState::Failed,
@@ -162,6 +167,7 @@ async fn run(state: Arc<AppState>) -> anyhow::Result<()> {
     let mut last_propagation_download = 0.0;
     let (outbound_result_tx, mut outbound_result_rx) = tokio::sync::mpsc::channel(16);
     let mut outbound_active = false;
+    let mut background_tasks = tokio::task::JoinSet::new();
 
     let mut command_rx = state
         .network_command_rx
@@ -236,7 +242,7 @@ async fn run(state: Arc<AppState>) -> anyhow::Result<()> {
                     NetworkCommand::FetchPage { url, reload, fields, response } => {
                         let state = state.clone();
                         let runtime = runtime.clone();
-                        tokio::spawn(async move {
+                        background_tasks.spawn(async move {
                             let result = async {
                                 let identity = Identity::from_private_key(&browser_private_key)?;
                                 fetch_page(&state, &runtime, &identity, &url, reload, &fields).await
@@ -248,7 +254,7 @@ async fn run(state: Arc<AppState>) -> anyhow::Result<()> {
                     }
                     NetworkCommand::FetchFile { url, response } => {
                         let runtime = runtime.clone();
-                        tokio::spawn(async move {
+                        background_tasks.spawn(async move {
                             let result = async {
                                 let identity = Identity::from_private_key(&browser_private_key)?;
                                 fetch_file(&runtime, &identity, &url).await
@@ -279,6 +285,13 @@ async fn run(state: Arc<AppState>) -> anyhow::Result<()> {
                 if let Some(result) = result {
                     outbound_active = false;
                     finish_outbound(&state, result);
+                }
+            }
+            completed = background_tasks.join_next(), if !background_tasks.is_empty() => {
+                if let Some(Err(error)) = completed
+                    && !error.is_cancelled()
+                {
+                    tracing::warn!(%error, "network background task failed");
                 }
             }
             _ = interval.tick() => {
@@ -324,7 +337,7 @@ async fn run(state: Arc<AppState>) -> anyhow::Result<()> {
                         .to_vec();
                     let tx = outbound_result_tx.clone();
                     outbound_active = true;
-                    tokio::spawn(async move {
+                    background_tasks.spawn(async move {
                         let result = attempt_outbound(
                             &state_for_task,
                             &runtime_for_task,
@@ -337,7 +350,10 @@ async fn run(state: Arc<AppState>) -> anyhow::Result<()> {
             }
         }
     }
+    background_tasks.abort_all();
+    while background_tasks.join_next().await.is_some() {}
     link_manager_task.abort();
+    let _ = link_manager_task.await;
     let _ = rrc_task.await;
     Ok(())
 }
@@ -683,6 +699,11 @@ async fn receive_message(
     .await;
     if let Err(error) = result {
         tracing::warn!(%error, "could not process inbound LXMF message");
+        let _ = state.database.record_operational_error(
+            "lxmf.receive",
+            &error.to_string(),
+            now_f64() as i64,
+        );
     }
 }
 

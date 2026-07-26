@@ -69,6 +69,14 @@ The current development slice provides:
   backwards-compatible fallback for hubs that do not advertise them;
 - dependency-free RRC UI regression tests for delayed room replies, multi-hub
   unread isolation, room selection, and hub removal;
+- automatic SQLite schema reconciliation through version 6, with startup
+  rejection of databases created by newer incompatible versions;
+- bounded retention for per-peer message history, browser cache entries and
+  bytes, known announces, RRC history, and operational errors;
+- tracked and cancelled browser, delivery, and RRC query tasks, with interrupted
+  outbound messages recovered from the persistent queue after restart;
+- repeatable fault-injection and live interoperability harnesses covering
+  rsReticulum, rsLXMF, rsRRCD, Python NomadNet RRC, and Python LXMF;
 - explicit module boundaries for LXMF conversations, remote-page browsing,
   and RRC;
 - a versioned HTTP API and WebSocket event stream.
@@ -118,6 +126,33 @@ The HTTP listener is intentionally loopback-only by default. Binding it to a
 non-loopback address requires `--allow-remote`; authentication for remote
 access is not implemented yet.
 
+## Reliability tests
+
+The deterministic fault matrix exercises Link recovery, Resource retry and
+proof handling, duplicate and corrupt LXMF input, propagation-node changes,
+database migration, and restart recovery:
+
+```text
+tests/reliability_matrix.sh
+```
+
+The live harness uses the sibling Rust projects and the editable Python
+Reticulum, LXMF, and NomadNet packages installed in `.venv`:
+
+```text
+tests/live_interop.sh ~/.rsReticulum preflight
+tests/live_interop.sh ~/.rsReticulum rrc
+tests/live_interop.sh ~/.rsReticulum lxmf
+tests/live_interop.sh ~/.rsReticulum all
+```
+
+The RRC scenario covers WELCOME, LIST, JOIN, WHO, PING, and message exchange
+between Python NomadNet RRC and rsRRCD. The LXMF scenario sends messages from
+both lxmd-rs and Python LXMF into rsNomadNet and verifies discovery of a fresh
+rsLXMF propagation node. To include a live Python NomadNet page fetch, set
+`PYTHON_NOMADNET_DESTINATION` to its 32-character destination hash; set
+`REQUIRE_PYTHON_NOMADNET=1` to make that optional peer mandatory.
+
 ## Status
 
 This repository is an experimental but usable vertical slice. Runtime
@@ -127,5 +162,5 @@ and remote-page browsing are functional and have interoperability coverage.
 The browser supports the practical Micron Guide surface, forms, partials,
 anchors, cache control, Resource responses, and downloads. Messaging includes
 durable unread state and drafts, searchable history, delivery details, and
-responsive navigation. The next implementation stage is RRC follow-up,
-followed by broader reliability testing and release-oriented hardening.
+responsive navigation. Browser, messaging, RRC, and reliability blocks are
+complete; the next stage is security and deployment hardening.

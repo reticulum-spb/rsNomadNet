@@ -10,6 +10,12 @@ use crate::models::{
 };
 
 const RRC_HISTORY_PER_ROOM: usize = 500;
+const MESSAGE_HISTORY_PER_CONVERSATION: usize = 2_000;
+const BROWSER_CACHE_ENTRIES: usize = 256;
+const BROWSER_CACHE_BYTES: i64 = 64 * 1024 * 1024;
+const KNOWN_DESTINATIONS_LIMIT: usize = 2_048;
+const OPERATIONAL_ERRORS_LIMIT: usize = 500;
+const CURRENT_SCHEMA_VERSION: i64 = 6;
 
 #[derive(Clone)]
 pub struct Database {
@@ -159,6 +165,15 @@ impl Database {
                 name TEXT NOT NULL,
                 created_at INTEGER NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS operational_errors (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                component TEXT NOT NULL,
+                message TEXT NOT NULL,
+                timestamp INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS operational_errors_time
+                ON operational_errors(timestamp DESC, id DESC);
             ",
         )?;
         ensure_column(&connection, "rrc_hubs", "nick", "TEXT")?;
@@ -191,9 +206,94 @@ impl Database {
             ",
             [],
         )?;
+        let version: i64 = connection.query_row(
+            "SELECT COALESCE(MAX(version), 0) FROM schema_version",
+            [],
+            |row| row.get(0),
+        )?;
+        if version > CURRENT_SCHEMA_VERSION {
+            anyhow::bail!(
+                "database schema version {version} is newer than supported version {CURRENT_SCHEMA_VERSION}"
+            );
+        }
+        connection.execute("DELETE FROM schema_version", [])?;
+        connection.execute(
+            "INSERT INTO schema_version(version) VALUES (?1)",
+            [CURRENT_SCHEMA_VERSION],
+        )?;
         Ok(Self {
             connection: Arc::new(Mutex::new(connection)),
         })
+    }
+
+    #[cfg(test)]
+    fn schema_version(&self) -> anyhow::Result<i64> {
+        let connection = self.connection.lock().expect("database mutex poisoned");
+        connection
+            .query_row("SELECT MAX(version) FROM schema_version", [], |row| {
+                row.get(0)
+            })
+            .map_err(Into::into)
+    }
+
+    pub fn maintain(&self, now: i64) -> anyhow::Result<()> {
+        let mut connection = self.connection.lock().expect("database mutex poisoned");
+        let transaction = connection.transaction()?;
+        transaction.execute(
+            "DELETE FROM browser_cache WHERE expires_at IS NOT NULL AND expires_at <= ?1",
+            [now],
+        )?;
+        prune_browser_cache(&transaction)?;
+        prune_known_destinations(&transaction)?;
+        prune_operational_errors(&transaction)?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    pub fn record_operational_error(
+        &self,
+        component: &str,
+        message: &str,
+        timestamp: i64,
+    ) -> anyhow::Result<()> {
+        let mut connection = self.connection.lock().expect("database mutex poisoned");
+        let transaction = connection.transaction()?;
+        transaction.execute(
+            "
+            INSERT INTO operational_errors(component, message, timestamp)
+            VALUES (?1, ?2, ?3)
+            ",
+            params![component, message, timestamp],
+        )?;
+        prune_operational_errors(&transaction)?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    #[cfg(test)]
+    fn operational_error_count(&self) -> anyhow::Result<usize> {
+        table_count(&self.connection, "operational_errors")
+    }
+
+    #[cfg(test)]
+    fn message_count(&self, destination_hash: &str) -> anyhow::Result<usize> {
+        let connection = self.connection.lock().expect("database mutex poisoned");
+        let count: i64 = connection.query_row(
+            "SELECT COUNT(*) FROM messages WHERE destination_hash = ?1",
+            [destination_hash],
+            |row| row.get(0),
+        )?;
+        Ok(count.max(0) as usize)
+    }
+
+    #[cfg(test)]
+    fn browser_cache_count(&self) -> anyhow::Result<usize> {
+        table_count(&self.connection, "browser_cache")
+    }
+
+    #[cfg(test)]
+    fn known_destination_count(&self) -> anyhow::Result<usize> {
+        table_count(&self.connection, "known_destinations")
     }
 
     pub fn save_rrc_hub(
@@ -309,8 +409,9 @@ impl Database {
         entry: &DirectoryEntry,
         app_data: Option<&[u8]>,
     ) -> anyhow::Result<()> {
-        let connection = self.connection.lock().expect("database mutex poisoned");
-        connection.execute(
+        let mut connection = self.connection.lock().expect("database mutex poisoned");
+        let transaction = connection.transaction()?;
+        transaction.execute(
             "
             INSERT INTO known_destinations
                 (destination_hash, identity_hash, delivery_hash, kind,
@@ -341,6 +442,8 @@ impl Database {
                 app_data,
             ],
         )?;
+        prune_known_destinations(&transaction)?;
+        transaction.commit()?;
         Ok(())
     }
 
@@ -480,8 +583,9 @@ impl Database {
         }
         let content_hash = hex::encode(rns_crypto::sha::full_hash(body));
         let expires_at = now.saturating_add(cache_seconds.min(i64::MAX as u64) as i64);
-        let connection = self.connection.lock().expect("database mutex poisoned");
-        connection.execute(
+        let mut connection = self.connection.lock().expect("database mutex poisoned");
+        let transaction = connection.transaction()?;
+        transaction.execute(
             "
             INSERT INTO browser_cache(url, body, content_hash, expires_at, stored_at)
             VALUES (?1, ?2, ?3, ?4, ?5)
@@ -493,6 +597,8 @@ impl Database {
             ",
             params![url, body, content_hash, expires_at, now],
         )?;
+        prune_browser_cache(&transaction)?;
+        transaction.commit()?;
         Ok(())
     }
 
@@ -763,8 +869,9 @@ impl Database {
 
     #[allow(dead_code, reason = "used by the incoming LXMF slice")]
     pub fn store_message(&self, message: NewMessage<'_>) -> anyhow::Result<MessageView> {
-        let connection = self.connection.lock().expect("database mutex poisoned");
-        connection.execute(
+        let mut connection = self.connection.lock().expect("database mutex poisoned");
+        let transaction = connection.transaction()?;
+        transaction.execute(
             "
             INSERT INTO messages
                 (destination_hash, source_hash, title, content, timestamp, outbound, state,
@@ -786,8 +893,11 @@ impl Database {
                 message.message_hash,
             ],
         )?;
+        let id = transaction.last_insert_rowid();
+        prune_message_history(&transaction, message.destination_hash)?;
+        transaction.commit()?;
         Ok(MessageView {
-            id: connection.last_insert_rowid(),
+            id,
             destination_hash: message.destination_hash.into(),
             source_hash: message.source_hash.into(),
             title: message.title.into(),
@@ -808,8 +918,9 @@ impl Database {
         message: NewMessage<'_>,
         propagation_node: Option<&str>,
     ) -> anyhow::Result<MessageView> {
-        let connection = self.connection.lock().expect("database mutex poisoned");
-        connection.execute(
+        let mut connection = self.connection.lock().expect("database mutex poisoned");
+        let transaction = connection.transaction()?;
+        transaction.execute(
             "
             INSERT INTO messages
                 (destination_hash, source_hash, title, content, timestamp, outbound, state,
@@ -832,8 +943,11 @@ impl Database {
                 message.message_hash,
             ],
         )?;
+        let id = transaction.last_insert_rowid();
+        prune_message_history(&transaction, message.destination_hash)?;
+        transaction.commit()?;
         Ok(MessageView {
-            id: connection.last_insert_rowid(),
+            id,
             destination_hash: message.destination_hash.into(),
             source_hash: message.source_hash.into(),
             title: message.title.into(),
@@ -978,6 +1092,97 @@ impl Database {
     }
 }
 
+fn prune_message_history(
+    transaction: &rusqlite::Transaction<'_>,
+    destination_hash: &str,
+) -> anyhow::Result<()> {
+    transaction.execute(
+        "
+        DELETE FROM messages
+        WHERE destination_hash = ?1
+          AND id NOT IN (
+              SELECT id FROM messages
+              WHERE destination_hash = ?1
+              ORDER BY timestamp DESC, id DESC
+              LIMIT ?2
+          )
+          AND NOT (
+              outbound = 1 AND state IN ('queued', 'retrying', 'sending')
+          )
+        ",
+        params![destination_hash, MESSAGE_HISTORY_PER_CONVERSATION as i64],
+    )?;
+    Ok(())
+}
+
+fn prune_browser_cache(transaction: &rusqlite::Transaction<'_>) -> anyhow::Result<()> {
+    transaction.execute(
+        "
+        DELETE FROM browser_cache
+        WHERE url NOT IN (
+            SELECT url FROM browser_cache
+            ORDER BY stored_at DESC, url
+            LIMIT ?1
+        )
+        ",
+        [BROWSER_CACHE_ENTRIES as i64],
+    )?;
+    transaction.execute(
+        "
+        DELETE FROM browser_cache
+        WHERE url IN (
+            SELECT url FROM (
+                SELECT url,
+                       SUM(length(body)) OVER (ORDER BY stored_at DESC, url) AS cumulative_bytes
+                FROM browser_cache
+            )
+            WHERE cumulative_bytes > ?1
+        )
+        ",
+        [BROWSER_CACHE_BYTES],
+    )?;
+    Ok(())
+}
+
+fn prune_known_destinations(transaction: &rusqlite::Transaction<'_>) -> anyhow::Result<()> {
+    transaction.execute(
+        "
+        DELETE FROM known_destinations
+        WHERE destination_hash NOT IN (
+            SELECT destination_hash FROM known_destinations
+            ORDER BY last_seen DESC, destination_hash
+            LIMIT ?1
+        )
+        ",
+        [KNOWN_DESTINATIONS_LIMIT as i64],
+    )?;
+    Ok(())
+}
+
+fn prune_operational_errors(transaction: &rusqlite::Transaction<'_>) -> anyhow::Result<()> {
+    transaction.execute(
+        "
+        DELETE FROM operational_errors
+        WHERE id NOT IN (
+            SELECT id FROM operational_errors
+            ORDER BY timestamp DESC, id DESC
+            LIMIT ?1
+        )
+        ",
+        [OPERATIONAL_ERRORS_LIMIT as i64],
+    )?;
+    Ok(())
+}
+
+#[cfg(test)]
+fn table_count(connection: &Arc<Mutex<Connection>>, table: &str) -> anyhow::Result<usize> {
+    let connection = connection.lock().expect("database mutex poisoned");
+    let count: i64 = connection.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+        row.get(0)
+    })?;
+    Ok(count.max(0) as usize)
+}
+
 fn map_message(row: &rusqlite::Row<'_>) -> rusqlite::Result<MessageView> {
     Ok(MessageView {
         id: row.get(0)?,
@@ -1017,6 +1222,88 @@ fn ensure_column(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn migrates_every_previously_released_schema() {
+        for version in 1..CURRENT_SCHEMA_VERSION {
+            let directory = tempdir().unwrap();
+            let path = directory.path().join(format!("v{version}.db"));
+            let connection = Connection::open(&path).unwrap();
+            connection
+                .execute_batch(
+                    "
+                    CREATE TABLE schema_version(version INTEGER PRIMARY KEY);
+                    CREATE TABLE messages (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        destination_hash TEXT NOT NULL,
+                        source_hash TEXT NOT NULL,
+                        title TEXT NOT NULL DEFAULT '',
+                        content TEXT NOT NULL,
+                        timestamp INTEGER NOT NULL,
+                        outbound INTEGER NOT NULL,
+                        state TEXT NOT NULL,
+                        raw_lxm_path TEXT
+                    );
+                    INSERT INTO messages
+                        (destination_hash, source_hash, content, timestamp, outbound, state)
+                    VALUES ('aa', 'bb', 'preserved', 1, 0, 'delivered');
+                    ",
+                )
+                .unwrap();
+            connection
+                .execute("INSERT INTO schema_version(version) VALUES (?1)", [version])
+                .unwrap();
+            if version >= 2 {
+                connection
+                    .execute_batch(
+                        "
+                        CREATE TABLE rrc_hubs (
+                            destination_hash TEXT PRIMARY KEY,
+                            name TEXT,
+                            auto_reconnect INTEGER NOT NULL DEFAULT 1,
+                            updated_at INTEGER NOT NULL
+                        );
+                        INSERT INTO rrc_hubs(destination_hash, name, updated_at)
+                        VALUES ('cc', 'hub', 1);
+                        ",
+                    )
+                    .unwrap();
+            }
+            drop(connection);
+
+            let database = Database::open(&path).unwrap();
+            assert_eq!(database.schema_version().unwrap(), CURRENT_SCHEMA_VERSION);
+            assert_eq!(database.messages("aa").unwrap()[0].content, "preserved");
+            if version >= 2 {
+                assert_eq!(database.saved_rrc_hubs().unwrap()[0].destination_hash, "cc");
+            }
+            database.set_setting("migration_probe", "ok").unwrap();
+            database
+                .save_browser_bookmark("aa:/page/index.mu", "node", 1)
+                .unwrap();
+            database
+                .record_operational_error("migration", "ok", 1)
+                .unwrap();
+        }
+    }
+
+    #[test]
+    fn rejects_a_newer_database_schema() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("future.db");
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .execute_batch(
+                "
+                CREATE TABLE schema_version(version INTEGER PRIMARY KEY);
+                INSERT INTO schema_version(version) VALUES (999);
+                ",
+            )
+            .unwrap();
+        drop(connection);
+        assert!(Database::open(&path).is_err());
+    }
 
     #[test]
     fn stores_and_lists_conversations() {
@@ -1224,6 +1511,80 @@ mod tests {
                 .unwrap()
         );
         assert!(database.browser_bookmarks().unwrap().is_empty());
+    }
+
+    #[test]
+    fn retention_bounds_messages_cache_announces_and_errors() {
+        let database = Database::open(Path::new(":memory:")).unwrap();
+        for timestamp in 0..(MESSAGE_HISTORY_PER_CONVERSATION + 7) {
+            database
+                .store_message(NewMessage {
+                    destination_hash: "aa",
+                    source_hash: "bb",
+                    title: "",
+                    content: "message",
+                    timestamp: timestamp as i64,
+                    outbound: false,
+                    state: "delivered",
+                    delivery_method: "incoming",
+                    attempts: 0,
+                    next_attempt: 0,
+                    last_error: None,
+                    message_hash: None,
+                })
+                .unwrap();
+        }
+        assert_eq!(
+            database.message_count("aa").unwrap(),
+            MESSAGE_HISTORY_PER_CONVERSATION
+        );
+
+        for index in 0..(BROWSER_CACHE_ENTRIES + 7) {
+            database
+                .cache_page(
+                    &format!("{index:032x}:/page/index.mu"),
+                    b"page",
+                    60,
+                    index as i64,
+                )
+                .unwrap();
+        }
+        assert_eq!(
+            database.browser_cache_count().unwrap(),
+            BROWSER_CACHE_ENTRIES
+        );
+
+        for index in 0..(KNOWN_DESTINATIONS_LIMIT + 7) {
+            database
+                .upsert_directory(
+                    &DirectoryEntry {
+                        destination_hash: format!("{index:032x}"),
+                        identity_hash: None,
+                        delivery_hash: None,
+                        kind: "peer".into(),
+                        display_name: None,
+                        hops: 1,
+                        last_seen: index as i64,
+                        active: true,
+                    },
+                    None,
+                )
+                .unwrap();
+        }
+        assert_eq!(
+            database.known_destination_count().unwrap(),
+            KNOWN_DESTINATIONS_LIMIT
+        );
+
+        for index in 0..(OPERATIONAL_ERRORS_LIMIT + 7) {
+            database
+                .record_operational_error("test", "error", index as i64)
+                .unwrap();
+        }
+        assert_eq!(
+            database.operational_error_count().unwrap(),
+            OPERATIONAL_ERRORS_LIMIT
+        );
     }
 
     #[test]
