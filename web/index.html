@@ -88,37 +88,46 @@
       </section>
 
       <section class="view" id="view-network">
-        <div class="page-heading">
-          <div>
-            <span class="eyebrow">Reticulum</span>
-            <h1>Network</h1>
-            <p>Read-only health and traffic statistics.</p>
+        <div class="network-panel">
+          <div class="page-heading">
+            <div>
+              <span class="eyebrow">Reticulum</span>
+              <h1>Network</h1>
+              <p>Read-only health and traffic statistics.</p>
+            </div>
           </div>
-        </div>
-        <div class="metric-grid">
-          <article class="metric"><span>Interfaces</span><strong id="metric-interfaces">0</strong></article>
-          <article class="metric"><span>Received</span><strong id="metric-rx">0 B</strong></article>
-          <article class="metric"><span>Transmitted</span><strong id="metric-tx">0 B</strong></article>
-          <article class="metric"><span>TX drops</span><strong id="metric-drops">0</strong></article>
-        </div>
-        <div class="table-card">
-          <table>
-            <thead><tr><th>Interface</th><th>Status</th><th>Mode</th><th>Traffic</th><th>Rate</th><th>MTU</th></tr></thead>
-            <tbody id="interface-rows"></tbody>
-          </table>
-          <div class="empty compact" id="interfaces-empty">
-            <strong>No interface data</strong>
-            <span>Start without <code>--offline</code> to connect rsReticulum.</span>
+          <div class="metric-grid">
+            <article class="metric"><span>Interfaces</span><strong id="metric-interfaces">0</strong></article>
+            <article class="metric"><span>Received</span><strong id="metric-rx">0 B</strong></article>
+            <article class="metric"><span>Transmitted</span><strong id="metric-tx">0 B</strong></article>
+            <article class="metric"><span>TX drops</span><strong id="metric-drops">0</strong></article>
           </div>
-        </div>
-        <div class="section-heading">
-          <div><span class="eyebrow">Announces</span><h2>Known destinations</h2></div>
-          <span class="muted" id="directory-count">0 discovered</span>
-        </div>
-        <div class="directory-grid" id="directory-grid">
-          <div class="empty compact" id="directory-empty">
-            <strong>No announces received</strong>
-            <span>Peers and NomadNet nodes will appear as they announce.</span>
+          <div class="table-card">
+            <table>
+              <thead><tr><th>Interface</th><th>Status</th><th>Mode</th><th>Traffic</th><th>Rate</th><th>MTU</th></tr></thead>
+              <tbody id="interface-rows"></tbody>
+            </table>
+            <div class="empty compact" id="interfaces-empty">
+              <strong>No interface data</strong>
+              <span>Start without <code>--offline</code> to connect rsReticulum.</span>
+            </div>
+          </div>
+          <div class="section-heading directory-heading">
+            <div><span class="eyebrow">Announces</span><h2>Known destinations</h2></div>
+            <div class="directory-controls">
+              <fieldset id="directory-filters" aria-label="Destination filters">
+                <label><input type="checkbox" value="peer" checked> Peer</label>
+                <label><input type="checkbox" value="node" checked> Node</label>
+                <label><input type="checkbox" value="propagation" checked> Propagation</label>
+              </fieldset>
+              <span class="muted" id="directory-count">0 discovered</span>
+            </div>
+          </div>
+          <div class="directory-grid" id="directory-grid">
+            <div class="empty compact" id="directory-empty">
+              <strong>No announces received</strong>
+              <span>Peers and NomadNet nodes will appear as they announce.</span>
+            </div>
           </div>
         </div>
       </section>

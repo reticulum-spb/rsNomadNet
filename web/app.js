@@ -308,15 +308,25 @@ function relativeTime(timestamp) {
 }
 
 function renderDirectory() {
-  $("#directory-count").textContent = `${state.directory.length} discovered`;
+  const enabledKinds = new Set(
+    $$("#directory-filters input:checked").map((input) => input.value),
+  );
+  const visibleEntries = state.directory.filter((entry) => enabledKinds.has(entry.kind));
+  $("#directory-count").textContent = visibleEntries.length === state.directory.length
+    ? `${visibleEntries.length} discovered`
+    : `${visibleEntries.length} of ${state.directory.length}`;
   const grid = $("#directory-grid");
-  if (!state.directory.length) {
+  if (!visibleEntries.length) {
     const empty = document.createElement("div");
     empty.className = "empty compact";
-    empty.innerHTML = "<strong>No announces received</strong><span>Peers and NomadNet nodes will appear as they announce.</span>";
+    if (state.directory.length) {
+      empty.innerHTML = "<strong>No matching destinations</strong><span>Enable another destination type to show it.</span>";
+    } else {
+      empty.innerHTML = "<strong>No announces received</strong><span>Peers and NomadNet nodes will appear as they announce.</span>";
+    }
     grid.replaceChildren(empty);
   } else {
-    grid.replaceChildren(...state.directory.map((entry) => {
+    grid.replaceChildren(...visibleEntries.map((entry) => {
       const card = document.createElement("article");
       card.className = "directory-card";
       const header = document.createElement("header");
@@ -926,6 +936,8 @@ $$(".nav-item").forEach((button) => {
     switchView(button.dataset.view);
   });
 });
+
+$("#directory-filters").addEventListener("change", renderDirectory);
 
 function renderRrc() {
   const hubs = [...state.rrc.hubs.values()].filter((hub) => hub.connected);

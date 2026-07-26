@@ -110,6 +110,8 @@ main { min-width: 0; padding: 42px; overflow: hidden; }
 .empty-icon { color: var(--accent); font-size: 32px; }
 
 .metric-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; margin-bottom: 18px; }
+.network-panel { height: min(820px, calc(100vh - 156px)); min-height: 480px; padding: 26px; border: 1px solid var(--border); border-radius: 14px; background: var(--panel); overflow-y: auto; overscroll-behavior: contain; }
+.network-panel .page-heading { margin-bottom: 24px; }
 .metric { display: grid; gap: 14px; padding: 18px; border: 1px solid var(--border); border-radius: 12px; background: linear-gradient(145deg, var(--panel-2), var(--panel)); }
 .metric span { color: var(--muted); font-size: 12px; }
 .metric strong { font-size: 24px; letter-spacing: -.03em; }
@@ -122,6 +124,10 @@ td.offline { color: var(--danger); }
 [hidden] { display: none !important; }
 .section-heading { display: flex; justify-content: space-between; align-items: end; margin: 34px 0 14px; }
 .section-heading h2 { margin: 4px 0 0; font-size: 22px; }
+.directory-controls { display: flex; align-items: center; gap: 14px; }
+.directory-controls fieldset { display: flex; flex-wrap: wrap; gap: 10px; margin: 0; padding: 0; border: 0; }
+.directory-controls label { display: flex; align-items: center; gap: 5px; color: var(--muted); font-size: 11px; cursor: pointer; }
+.directory-controls input { margin: 0; accent-color: var(--accent); }
 .muted { color: var(--muted); font-size: 11px; }
 .directory-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); gap: 12px; }
 .directory-grid > .empty { grid-column: 1 / -1; border: 1px dashed var(--border); border-radius: 12px; }
@@ -244,6 +250,9 @@ dialog input:focus, dialog textarea:focus, dialog select:focus { border-color: v
   .identity-card { display: none; }
   main { padding: 20px 12px; }
   .messages-panel { height: calc(100vh - 104px); min-height: 420px; }
+  .network-panel { height: calc(100vh - 104px); min-height: 420px; padding: 18px 12px; }
+  .directory-heading { align-items: stretch; flex-direction: column; gap: 12px; }
+  .directory-controls { align-items: flex-start; justify-content: space-between; flex-direction: column; gap: 8px; }
   .message-thread > header { align-items: stretch; flex-direction: column; }
   .thread-actions { width: 100%; }
   .thread-actions input { flex: 1; width: auto; min-width: 0; }
