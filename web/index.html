@@ -23,12 +23,14 @@
     <aside class="sidebar">
       <nav aria-label="Main navigation">
         <div class="nav-branch">
-          <button class="nav-item active" data-view="messages">
-            <span class="nav-icon">◫</span><span>Messages</span>
-          </button>
+          <div class="nav-branch-heading">
+            <button class="nav-item active" data-view="messages">
+              <span class="nav-icon">◫</span><span>Messages</span>
+            </button>
+            <button class="nav-add" id="new-message" aria-label="New message" title="New message">+</button>
+          </div>
           <div class="nav-children" aria-label="Message conversations">
             <div id="conversation-list"></div>
-            <button class="nav-action-item" id="new-message">＋ New message</button>
           </div>
         </div>
         <button class="nav-item" data-view="network">
@@ -38,9 +40,12 @@
           <span class="nav-icon">◎</span><span>Browser</span>
         </button>
         <div class="nav-branch">
-          <button class="nav-item" data-view="rrc">
-            <span class="nav-icon">#</span><span>RRC</span>
-          </button>
+          <div class="nav-branch-heading">
+            <button class="nav-item" data-view="rrc">
+              <span class="nav-icon">#</span><span>RRC</span>
+            </button>
+            <button class="nav-add" id="new-rrc-hub" aria-label="Connect to RRC hub" title="Connect to RRC hub">+</button>
+          </div>
           <div class="nav-children" id="rrc-hubs" aria-label="Connected RRC hubs"></div>
         </div>
       </nav>
@@ -127,11 +132,6 @@
       </section>
 
       <section class="view" id="view-rrc">
-        <div class="rrc-connect">
-          <input id="rrc-hub" placeholder="RRC hub destination hash" maxlength="32">
-          <input id="rrc-nick" placeholder="Nickname" maxlength="32">
-          <button class="primary" id="rrc-connect">Connect</button>
-        </div>
         <p class="form-error" id="rrc-error"></p>
         <div class="rrc-layout">
           <div class="rrc-room">
@@ -201,6 +201,21 @@
       <div class="dialog-actions">
         <button type="button" class="secondary" id="cancel-compose">Cancel</button>
         <button type="submit" class="primary" id="send-message">Send securely</button>
+      </div>
+    </form>
+  </dialog>
+  <dialog id="rrc-connect-dialog">
+    <form id="rrc-connect-form">
+      <div class="dialog-heading">
+        <div><span class="eyebrow">Realtime rooms</span><h2>Connect to RRC hub</h2></div>
+        <button type="button" class="icon-button" id="close-rrc-connect" aria-label="Close">×</button>
+      </div>
+      <label>Hub destination hash<input id="rrc-hub" autocomplete="off" minlength="32" maxlength="32" pattern="[0-9a-fA-F]{32}" required placeholder="32 hexadecimal characters"></label>
+      <label>Nickname <span class="optional">optional</span><input id="rrc-nick" maxlength="32"></label>
+      <p class="form-error" id="rrc-connect-error" role="alert"></p>
+      <div class="dialog-actions">
+        <button type="button" class="secondary" id="cancel-rrc-connect">Cancel</button>
+        <button type="submit" class="primary" id="rrc-connect">Connect</button>
       </div>
     </form>
   </dialog>

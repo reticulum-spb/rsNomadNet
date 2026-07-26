@@ -929,8 +929,17 @@ async function loadRrcUsers() {
   renderRrc();
 }
 
-$("#rrc-connect").addEventListener("click", async () => {
-  $("#rrc-error").textContent = "";
+const rrcConnectDialog = $("#rrc-connect-dialog");
+$("#new-rrc-hub").addEventListener("click", () => {
+  $("#rrc-connect-error").textContent = "";
+  rrcConnectDialog.showModal();
+});
+$("#close-rrc-connect").addEventListener("click", () => rrcConnectDialog.close());
+$("#cancel-rrc-connect").addEventListener("click", () => rrcConnectDialog.close());
+$("#rrc-connect-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  $("#rrc-connect-error").textContent = "";
+  $("#rrc-connect").disabled = true;
   try {
     const response = await fetch("/api/v1/rrc/connect", {
       method: "POST", headers: { "content-type": "application/json" },
@@ -939,7 +948,13 @@ $("#rrc-connect").addEventListener("click", async () => {
     const body = await response.json();
     if (!response.ok) throw new Error(body.error);
     state.rrc.activeHub = body.destination_hash;
-  } catch (error) { $("#rrc-error").textContent = error.message; }
+    rrcConnectDialog.close();
+    switchView("rrc");
+  } catch (error) {
+    $("#rrc-connect-error").textContent = error.message;
+  } finally {
+    $("#rrc-connect").disabled = false;
+  }
 });
 $("#rrc-join").addEventListener("click", async () => {
   const room = $("#rrc-room").value;
