@@ -1350,7 +1350,31 @@ dependencies = [
 ]
 
 [[package]]
-name = "rs-nomadnet"
+name = "rs-rrc"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "rand 0.8.7",
+ "regex",
+ "serde_cbor",
+ "sha2",
+]
+
+[[package]]
+name = "rs-rrc-client"
+version = "0.1.0"
+dependencies = [
+ "rns-identity",
+ "rns-runtime",
+ "rns-transport",
+ "rs-rrc",
+ "sha2",
+ "thiserror 2.0.19",
+ "tokio",
+]
+
+[[package]]
+name = "rsNomadNet"
 version = "0.1.0"
 dependencies = [
  "anyhow",
@@ -1376,30 +1400,6 @@ dependencies = [
  "tower-http",
  "tracing",
  "tracing-subscriber",
-]
-
-[[package]]
-name = "rs-rrc"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "rand 0.8.7",
- "regex",
- "serde_cbor",
- "sha2",
-]
-
-[[package]]
-name = "rs-rrc-client"
-version = "0.1.0"
-dependencies = [
- "rns-identity",
- "rns-runtime",
- "rns-transport",
- "rs-rrc",
- "sha2",
- "thiserror 2.0.19",
- "tokio",
 ]
 
 [[package]]
