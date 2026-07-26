@@ -32,10 +32,13 @@ The current development slice provides:
 - a safe Micron-to-AST renderer with nested sections, alignment, inline
   formatting and colours, links and anchors, styled dividers, preformatted
   blocks, page colours, table sizing, and cache headers;
-- page cache, browser history, navigation, and reload;
-- remote `/file/` downloads with Resource support, safe filenames, and a
-  64 MiB client-side limit;
-- basic Micron table rendering on a fixed-width font grid;
+- inspectable/clearable page cache, browser history, cancellable navigation,
+  retryable error views, and reload;
+- remote `/file/` downloads with single- and multi-segment Resource support,
+  Python NomadNet filename metadata, safe filenames, common MIME types, and a
+  pre-allocation 64 MiB client-side limit;
+- Micron table rendering with table/column alignment and sizing on a
+  fixed-width font grid;
 - Micron text/password inputs, checkbox and radio controls;
 - compatible form submission using `field_*` and `var_*` MessagePack request
   keys, including submit-all and fixed link variables;
@@ -100,7 +103,8 @@ access is not implemented yet.
 This repository is an experimental but usable vertical slice. Runtime
 lifecycle, interface statistics, directory discovery, persistent LXMF
 messaging, automatic/direct/opportunistic/propagated delivery, multi-hub RRC,
-and basic remote-page browsing are functional and have live interoperability
-coverage. The next implementation stage is broader Micron rendering and
-request compatibility, followed by browser hardening and release-oriented
-packaging.
+and remote-page browsing are functional and have interoperability coverage.
+The browser supports the practical Micron Guide surface, forms, partials,
+anchors, cache control, Resource responses, and downloads. The next
+implementation stage is messaging UI polish, followed by broader reliability
+testing and release-oriented hardening.

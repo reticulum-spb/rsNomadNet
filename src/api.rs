@@ -497,7 +497,7 @@ async fn download_file(
         Ok(Ok(file)) => (
             StatusCode::OK,
             [
-                (header::CONTENT_TYPE, "application/octet-stream".to_string()),
+                (header::CONTENT_TYPE, file.content_type),
                 (
                     header::CONTENT_DISPOSITION,
                     format!("attachment; filename=\"{}\"", file.filename),

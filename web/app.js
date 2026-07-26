@@ -6,7 +6,7 @@ const state = {
   activeConversation: null,
   browser: {
     history: [], position: -1, page: null, partialTimers: [], generation: 0,
-    navigationController: null, partialControllers: new Set(),
+    navigationController: null, partialControllers: new Set(), failedAddress: null,
   },
   rrc: {
     hubs: new Map(), activeHub: null, activeRoom: null, messages: [],
@@ -368,9 +368,13 @@ function renderInline(parts, parent) {
         const target = resolveBrowserTarget(part.target);
         if (target.startsWith("#")) {
           const anchor = target.slice(1);
-          const element = anchor
-            ? document.getElementById(`micron-${anchor}`)
-            : link.closest("p, h1, h2, h3, h4, h5, h6")?.nextElementSibling;
+          let element = anchor ? document.getElementById(`micron-${anchor}`) : null;
+          if (!anchor) {
+            element = link.closest("p, h1, h2, h3, h4, h5, h6");
+            do {
+              element = element?.nextElementSibling;
+            } while (element && !/^H[1-6]$/.test(element.tagName));
+          }
           element?.scrollIntoView({ behavior: "smooth", block: "start" });
         } else if (target.slice(32).startsWith(":/file/")) {
           downloadBrowserFile(target);
@@ -479,8 +483,9 @@ function renderMicronBlocks(blocks, container, generation) {
       const body = document.createElement("tbody");
       for (const row of block.rows) {
         const tableRow = document.createElement("tr");
-        for (const cell of row) {
+        for (const [index, cell] of row.entries()) {
           const tableCell = document.createElement("td");
+          tableCell.style.textAlign = block.column_alignments?.[index] || "left";
           renderInline(cell, tableCell);
           tableRow.append(tableCell);
         }
@@ -516,6 +521,7 @@ function refreshMicronPartials(partialId) {
     .filter((element) => !partialId || element.dataset.partialId === partialId);
   for (const element of partials) {
     if (element.partialTimer) window.clearTimeout(element.partialTimer);
+    element.partialTimer = null;
     loadMicronPartial(element, element.micronPartial, state.browser.generation);
   }
 }
@@ -540,15 +546,8 @@ async function loadMicronPartial(container, block, generation) {
     const page = await response.json();
     if (!response.ok) throw new Error(page.error || "Partial request failed");
     if (generation !== state.browser.generation || !container.isConnected) return;
+    container.classList.remove("failed");
     renderMicronBlocks(page.blocks, container, generation);
-    if (block.interval_seconds > 0) {
-      const timer = window.setTimeout(
-        () => loadMicronPartial(container, block, generation),
-        block.interval_seconds * 1000,
-      );
-      container.partialTimer = timer;
-      state.browser.partialTimers.push(timer);
-    }
   } catch (error) {
     if (error.name === "AbortError") return;
     container.classList.add("failed");
@@ -556,6 +555,18 @@ async function loadMicronPartial(container, block, generation) {
   } finally {
     state.browser.partialControllers.delete(controller);
     if (container.partialController === controller) container.partialController = null;
+    if (!controller.signal.aborted
+        && generation === state.browser.generation
+        && container.isConnected
+        && block.interval_seconds > 0
+        && !container.partialTimer) {
+      const timer = window.setTimeout(() => {
+        container.partialTimer = null;
+        loadMicronPartial(container, block, generation);
+      }, block.interval_seconds * 1000);
+      container.partialTimer = timer;
+      state.browser.partialTimers.push(timer);
+    }
   }
 }
 
@@ -566,6 +577,7 @@ function renderBrowserPage(page) {
   state.browser.partialTimers = [];
   state.browser.generation += 1;
   state.browser.page = page;
+  state.browser.failedAddress = null;
   $("#browser-address").value = page.url;
   $("#browser-status").textContent = `${page.from_cache ? "Cached" : "Received"} · ${page.blocks.length} blocks`;
   const container = $("#browser-page");
@@ -623,7 +635,7 @@ async function downloadBrowserFile(url) {
 function updateBrowserControls() {
   $("#browser-back").disabled = state.browser.position <= 0;
   $("#browser-forward").disabled = state.browser.position >= state.browser.history.length - 1;
-  $("#browser-reload").disabled = !state.browser.page;
+  $("#browser-reload").disabled = !state.browser.page && !state.browser.failedAddress;
 }
 
 async function navigateBrowser(url, options = {}) {
@@ -652,6 +664,13 @@ async function navigateBrowser(url, options = {}) {
     const body = await response.json();
     if (!response.ok) throw new Error(body.error || "Page request failed");
     renderBrowserPage(body);
+    const requestedAnchor = options.fields?.var_anchor;
+    if (requestedAnchor) {
+      window.setTimeout(
+        () => document.getElementById(`micron-${requestedAnchor}`)?.scrollIntoView({ block: "start" }),
+        0,
+      );
+    }
     if (!options.historyNavigation) {
       state.browser.history = state.browser.history.slice(0, state.browser.position + 1);
       state.browser.history.push(body.url);
@@ -661,7 +680,11 @@ async function navigateBrowser(url, options = {}) {
   } catch (error) {
     const message = error.name === "AbortError" ? "Request cancelled" : error.message;
     $("#browser-status").textContent = message;
-    if (error.name !== "AbortError") renderBrowserError(message, address);
+    if (error.name !== "AbortError") {
+      state.browser.failedAddress = address;
+      renderBrowserError(message, address);
+      updateBrowserControls();
+    }
   } finally {
     if (state.browser.navigationController === controller) {
       state.browser.navigationController = null;
@@ -1203,7 +1226,8 @@ $("#browser-address").addEventListener("keydown", (event) => {
   if (event.key === "Enter") navigateBrowser(event.currentTarget.value);
 });
 $("#browser-reload").addEventListener("click", () => {
-  if (state.browser.page) navigateBrowser(state.browser.page.url, { reload: true, historyNavigation: true });
+  const address = state.browser.failedAddress || state.browser.page?.url;
+  if (address) navigateBrowser(address, { reload: true, historyNavigation: true });
 });
 $("#browser-stop").addEventListener("click", () => state.browser.navigationController?.abort());
 $("#browser-back").addEventListener("click", () => {

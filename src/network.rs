@@ -12,7 +12,7 @@ use rns_crypto::ed25519::Ed25519PublicKey;
 use rns_identity::destination::Destination;
 use rns_identity::identity::Identity;
 use rns_runtime::application::announce_stream;
-use rns_runtime::link_client::LinkSession;
+use rns_runtime::link_client::{LinkResponse, LinkSession};
 use rns_runtime::link_manager::LinkManager;
 use rns_runtime::reticulum;
 use rns_transport::messages::{
@@ -21,12 +21,17 @@ use rns_transport::messages::{
 use tokio::sync::oneshot;
 
 use crate::app::AppState;
-use crate::browser::{BrowserPage, DownloadedFile, NomadUrl, parse_page};
+use crate::browser::{
+    BrowserPage, DownloadedFile, NomadUrl, download_content_type, parse_page, safe_download_name,
+};
 use crate::db::NewMessage;
 use crate::db::PendingMessage;
 use crate::models::{
     DirectoryEntry, InterfaceSnapshot, MessageView, NetworkSnapshot, NetworkState, ServerEvent,
 };
+
+const MAX_PAGE_BYTES: usize = 4 * 1024 * 1024;
+const MAX_DOWNLOAD_BYTES: usize = 64 * 1024 * 1024;
 
 pub enum NetworkCommand {
     SendMessage {
@@ -334,12 +339,19 @@ async fn fetch_page(
     } else {
         Some(encode_form_fields(fields)?)
     };
-    let response = request_node(runtime, identity, url, request_data.as_deref()).await?;
-    let page = parse_page(canonical.clone(), &response, false)?;
+    let response = request_node(
+        runtime,
+        identity,
+        url,
+        request_data.as_deref(),
+        MAX_PAGE_BYTES,
+    )
+    .await?;
+    let page = parse_page(canonical.clone(), &response.data, false)?;
     if fields.is_empty() {
         state
             .database
-            .cache_page(&canonical, &response, page.cache_seconds, now)?;
+            .cache_page(&canonical, &response.data, page.cache_seconds, now)?;
     }
     Ok(page)
 }
@@ -352,27 +364,44 @@ async fn fetch_file(
     if !url.is_file() {
         anyhow::bail!("file request requires a /file/ path");
     }
-    let bytes = request_node(runtime, identity, url, None).await?;
-    if bytes.len() > 64 * 1024 * 1024 {
+    let response = request_node(runtime, identity, url, None, MAX_DOWNLOAD_BYTES).await?;
+    if response.data.len() > MAX_DOWNLOAD_BYTES {
         anyhow::bail!("download exceeds the 64 MiB client limit");
     }
-    let filename = url
-        .path
-        .rsplit('/')
-        .next()
-        .filter(|name| !name.is_empty())
-        .unwrap_or("download.bin")
-        .chars()
-        .map(|character| {
-            if character.is_ascii_alphanumeric() || matches!(character, '.' | '-' | '_') {
-                character
-            } else {
-                '_'
-            }
-        })
-        .take(180)
-        .collect();
-    Ok(DownloadedFile { filename, bytes })
+    let metadata_name = response
+        .metadata
+        .as_deref()
+        .and_then(filename_from_resource_metadata);
+    let filename = safe_download_name(
+        metadata_name
+            .as_deref()
+            .unwrap_or_else(|| url.path.rsplit('/').next().unwrap_or("download.bin")),
+    );
+    let content_type = download_content_type(&filename).to_string();
+    Ok(DownloadedFile {
+        filename,
+        content_type,
+        bytes: response.data,
+    })
+}
+
+fn filename_from_resource_metadata(metadata: &[u8]) -> Option<String> {
+    let value = rmpv::decode::read_value(&mut std::io::Cursor::new(metadata)).ok()?;
+    let rmpv::Value::Map(entries) = value else {
+        return None;
+    };
+    entries.into_iter().find_map(|(key, value)| {
+        let is_name = key.as_str() == Some("name")
+            || matches!(&key, rmpv::Value::Binary(bytes) if bytes == b"name");
+        if !is_name {
+            return None;
+        }
+        match value {
+            rmpv::Value::String(value) => value.as_str().map(str::to_string),
+            rmpv::Value::Binary(value) => String::from_utf8(value).ok(),
+            _ => None,
+        }
+    })
 }
 
 async fn request_node(
@@ -380,7 +409,8 @@ async fn request_node(
     identity: &Identity,
     url: &NomadUrl,
     request_data: Option<&[u8]>,
-) -> anyhow::Result<Vec<u8>> {
+    max_response_bytes: usize,
+) -> anyhow::Result<LinkResponse> {
     runtime
         .transport_tx
         .send(TransportMessage::RequestPath {
@@ -399,7 +429,12 @@ async fn request_node(
     )
     .await?;
     let response = link
-        .request(&url.path, request_data, Duration::from_secs(120))
+        .request_with_metadata_limit(
+            &url.path,
+            request_data,
+            Duration::from_secs(120),
+            max_response_bytes,
+        )
         .await?;
     link.close().await?;
     Ok(response)
@@ -1163,5 +1198,23 @@ mod tests {
     fn form_fields_reject_unscoped_keys() {
         let fields = BTreeMap::from([("name".to_string(), "Alice".to_string())]);
         assert!(encode_form_fields(&fields).is_err());
+    }
+
+    #[test]
+    fn reads_python_nomadnet_resource_filename_metadata() {
+        let mut metadata = Vec::new();
+        rmpv::encode::write_value(
+            &mut metadata,
+            &rmpv::Value::Map(vec![(
+                rmpv::Value::String("name".into()),
+                rmpv::Value::Binary(b"docs/report.txt".to_vec()),
+            )]),
+        )
+        .unwrap();
+        assert_eq!(
+            filename_from_resource_metadata(&metadata).as_deref(),
+            Some("docs/report.txt")
+        );
+        assert!(filename_from_resource_metadata(b"not messagepack").is_none());
     }
 }

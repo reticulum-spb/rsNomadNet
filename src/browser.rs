@@ -74,7 +74,56 @@ pub struct BrowserPage {
 
 pub struct DownloadedFile {
     pub filename: String,
+    pub content_type: String,
     pub bytes: Vec<u8>,
+}
+
+pub fn safe_download_name(value: &str) -> String {
+    let basename = value
+        .rsplit(['/', '\\'])
+        .find(|part| !part.is_empty())
+        .unwrap_or("download.bin");
+    let filename: String = basename
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || matches!(character, '.' | '-' | '_') {
+                character
+            } else {
+                '_'
+            }
+        })
+        .take(180)
+        .collect();
+    if filename.is_empty() || filename == "." || filename == ".." {
+        "download.bin".into()
+    } else {
+        filename
+    }
+}
+
+pub fn download_content_type(filename: &str) -> &'static str {
+    match filename
+        .rsplit('.')
+        .next()
+        .unwrap_or("")
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "txt" | "log" => "text/plain; charset=utf-8",
+        "mu" => "text/x-micron; charset=utf-8",
+        "json" => "application/json",
+        "pdf" => "application/pdf",
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "svg" => "image/svg+xml",
+        "webp" => "image/webp",
+        "wav" => "audio/wav",
+        "mp3" => "audio/mpeg",
+        "ogg" => "audio/ogg",
+        "zip" => "application/zip",
+        _ => "application/octet-stream",
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -110,6 +159,7 @@ pub enum MicronBlock {
     Table {
         alignment: Alignment,
         max_width: Option<u16>,
+        column_alignments: Vec<Alignment>,
         rows: Vec<Vec<Vec<Inline>>>,
     },
     Partial {
@@ -190,13 +240,19 @@ pub fn parse_page(
     let mut table_rows: Option<Vec<Vec<Vec<Inline>>>> = None;
     let mut table_alignment = Alignment::Left;
     let mut table_max_width = None;
+    let mut table_column_alignments = Vec::new();
     let mut alignment = Alignment::Left;
     let mut depth = 0u8;
     let mut style = MicronStyle::default();
+    let mut partial_count = 0usize;
 
     for line in source.lines() {
         if let Some(value) = line.strip_prefix("#!c=") {
-            cache_seconds = value.trim().parse().unwrap_or(cache_seconds);
+            cache_seconds = value
+                .trim()
+                .parse::<u64>()
+                .unwrap_or(cache_seconds)
+                .min(30 * 24 * 60 * 60);
             continue;
         }
         if let Some(value) = line.strip_prefix("#!fg=") {
@@ -212,7 +268,10 @@ pub fn parse_page(
             continue;
         }
         if !literal && let Some(partial) = parse_partial(line) {
-            blocks.push(partial);
+            if partial_count < 64 {
+                blocks.push(partial);
+                partial_count += 1;
+            }
             continue;
         }
         if let Some(options) = line.strip_prefix("`t") {
@@ -221,6 +280,7 @@ pub fn parse_page(
                     blocks.push(MicronBlock::Table {
                         alignment: table_alignment,
                         max_width: table_max_width,
+                        column_alignments: table_column_alignments.clone(),
                         rows,
                     });
                 }
@@ -242,24 +302,51 @@ pub fn parse_page(
                     _ => alignment,
                 };
                 table_max_width = options.parse::<u16>().ok().map(|width| width.clamp(1, 512));
+                table_column_alignments.clear();
                 table_rows = Some(Vec::new());
             }
             continue;
         }
         if let Some(rows) = table_rows.as_mut() {
-            rows.push(
-                line.trim()
-                    .trim_matches('|')
-                    .split('|')
-                    .map(|cell| parse_inline(cell.trim(), &mut style))
-                    .collect(),
-            );
+            let cells: Vec<&str> = line.trim().trim_matches('|').split('|').collect();
+            let separator = !cells.is_empty()
+                && cells.iter().all(|cell| {
+                    let cell = cell.trim();
+                    !cell.is_empty()
+                        && cell.chars().all(|character| matches!(character, '-' | ':'))
+                        && cell.contains('-')
+                });
+            if !separator {
+                rows.push(
+                    cells
+                        .into_iter()
+                        .map(|cell| parse_inline(cell.trim(), &mut style))
+                        .collect(),
+                );
+            } else {
+                table_column_alignments = cells
+                    .into_iter()
+                    .map(|cell| {
+                        let cell = cell.trim();
+                        match (cell.starts_with(':'), cell.ends_with(':')) {
+                            (true, true) => Alignment::Center,
+                            (_, true) => Alignment::Right,
+                            _ => Alignment::Left,
+                        }
+                    })
+                    .collect();
+            }
             continue;
         }
         if literal {
-            blocks.push(MicronBlock::Preformatted {
-                text: line.to_string(),
-            });
+            if let Some(MicronBlock::Preformatted { text }) = blocks.last_mut() {
+                text.push('\n');
+                text.push_str(line);
+            } else {
+                blocks.push(MicronBlock::Preformatted {
+                    text: line.to_string(),
+                });
+            }
             continue;
         }
         if line.starts_with('#') {
@@ -268,7 +355,11 @@ pub fn parse_page(
         if line.starts_with('-') {
             blocks.push(MicronBlock::Divider {
                 depth,
-                character: line.chars().nth(1).unwrap_or('─'),
+                character: if line.chars().count() == 2 {
+                    line.chars().nth(1).unwrap_or('─')
+                } else {
+                    '─'
+                },
             });
             continue;
         }
@@ -335,6 +426,7 @@ pub fn parse_page(
         blocks.push(MicronBlock::Table {
             alignment: table_alignment,
             max_width: table_max_width,
+            column_alignments: table_column_alignments,
             rows,
         });
     }
@@ -477,8 +569,14 @@ fn parse_partial(line: &str) -> Option<MicronBlock> {
     let interval_seconds = components
         .next()
         .and_then(|value| value.parse::<u64>().ok())
-        .unwrap_or(0)
-        .min(24 * 60 * 60);
+        .map(|seconds| {
+            if seconds == 0 {
+                0
+            } else {
+                seconds.clamp(1, 24 * 60 * 60)
+            }
+        })
+        .unwrap_or(0);
     let fields = components
         .next()
         .map(|value| {
@@ -765,6 +863,89 @@ mod tests {
                 fields,
             } if target.ends_with("/page/status.mu")
                 && fields == &["pid=32", "user_name"]
+        ));
+    }
+
+    #[test]
+    fn sanitises_download_names_and_infers_common_content_types() {
+        assert_eq!(safe_download_name("../../report 1.pdf"), "report_1.pdf");
+        assert_eq!(safe_download_name(".."), "download.bin");
+        assert_eq!(download_content_type("report.pdf"), "application/pdf");
+        assert_eq!(
+            download_content_type("unknown.data"),
+            "application/octet-stream"
+        );
+    }
+
+    #[test]
+    fn groups_literals_and_omits_table_separator_rows() {
+        let page = parse_page(
+            "node:/page/structure.mu".into(),
+            b"`=\nline one\nline two\n`=\n`t\n| Name | Value |\n| ---- | :---: |\n| one | 1 |\n`t\n",
+            false,
+        )
+        .unwrap();
+        assert!(matches!(
+            &page.blocks[0],
+            MicronBlock::Preformatted { text } if text == "line one\nline two"
+        ));
+        let MicronBlock::Table { rows, .. } = &page.blocks[1] else {
+            panic!("expected table");
+        };
+        assert_eq!(rows.len(), 2);
+    }
+
+    #[test]
+    fn bounds_remote_cache_and_partial_refresh_values() {
+        let page = parse_page(
+            "node:/page/bounds.mu".into(),
+            b"#!c=999999999\n`{:/page/status.mu`0}\n`{:/page/status.mu`999999999}\n",
+            false,
+        )
+        .unwrap();
+        assert_eq!(page.cache_seconds, 30 * 24 * 60 * 60);
+        assert!(matches!(
+            &page.blocks[0],
+            MicronBlock::Partial {
+                interval_seconds: 0,
+                ..
+            }
+        ));
+        assert!(matches!(
+            &page.blocks[1],
+            MicronBlock::Partial {
+                interval_seconds,
+                ..
+            } if *interval_seconds == 24 * 60 * 60
+        ));
+    }
+
+    #[test]
+    fn parses_representative_nomadnet_guide_corpus() {
+        let page = parse_page(
+            "node:/page/compat.mu".into(),
+            include_bytes!("../tests/fixtures/micron_compat.mu"),
+            false,
+        )
+        .unwrap();
+        assert_eq!(page.title.as_deref(), Some("Micron Compatibility"));
+        assert_eq!(page.foreground.as_deref(), Some("#dddddd"));
+        assert_eq!(page.background.as_deref(), Some("#222222"));
+        assert!(page.blocks.iter().any(|block| matches!(
+            block,
+            MicronBlock::Table {
+                rows,
+                column_alignments,
+                ..
+            } if rows.len() == 2
+                && column_alignments == &[Alignment::Left, Alignment::Right]
+        )));
+        assert!(page
+            .blocks
+            .iter()
+            .any(|block| matches!(block, MicronBlock::Partial { fields, .. } if fields == &["pid=status", "user_name"])));
+        assert!(page.blocks.iter().any(
+            |block| matches!(block, MicronBlock::Preformatted { text } if text.contains("second literal line"))
         ));
     }
 }
