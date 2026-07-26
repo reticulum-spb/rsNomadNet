@@ -85,7 +85,15 @@ pub fn spawn(
                 }
                 command = commands.recv() => {
                     let Some(command) = command else { break };
-                    handle_command(&client, &state.database, source, command).await;
+                    if is_remote_query(&command) {
+                        let client = client.clone();
+                        let database = state.database.clone();
+                        tokio::spawn(async move {
+                            handle_command(&client, &database, source, command).await;
+                        });
+                    } else {
+                        handle_command(&client, &state.database, source, command).await;
+                    }
                 }
                 event = events.recv() => {
                     match event {
@@ -99,6 +107,13 @@ pub fn spawn(
             }
         }
     })
+}
+
+fn is_remote_query(command: &RrcCommand) -> bool {
+    matches!(
+        command,
+        RrcCommand::ListRooms { .. } | RrcCommand::ListUsers { .. } | RrcCommand::Ping { .. }
+    )
 }
 
 async fn handle_command(

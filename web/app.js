@@ -603,9 +603,10 @@ function connectEvents() {
       ];
       renderDirectory();
     } else if (message.type === "rrc_hub_changed") {
+      const previous = state.rrc.hubs.get(message.payload.destination_hash);
       state.rrc.hubs.set(message.payload.destination_hash, message.payload);
       state.rrc.activeHub ||= message.payload.destination_hash;
-      renderRrc();
+      if (JSON.stringify(previous) !== JSON.stringify(message.payload)) renderRrc();
       if (message.payload.destination_hash === state.rrc.activeHub
           && message.payload.connected
           && state.rrc.activeRoom) {
