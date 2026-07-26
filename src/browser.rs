@@ -102,6 +102,11 @@ pub enum MicronBlock {
         max_width: Option<u16>,
         rows: Vec<Vec<Vec<Inline>>>,
     },
+    Partial {
+        target: String,
+        interval_seconds: u64,
+        fields: Vec<String>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -194,6 +199,10 @@ pub fn parse_page(
         }
         if line == "`=" {
             literal = !literal;
+            continue;
+        }
+        if !literal && let Some(partial) = parse_partial(line) {
+            blocks.push(partial);
             continue;
         }
         if let Some(options) = line.strip_prefix("`t") {
@@ -448,6 +457,35 @@ fn parse_inline(line: &str, style: &mut MicronStyle) -> Vec<Inline> {
     output
 }
 
+fn parse_partial(line: &str) -> Option<MicronBlock> {
+    let value = line.strip_prefix("`{")?.strip_suffix('}')?;
+    let mut components = value.split('`');
+    let target = components.next()?.trim();
+    if target.is_empty() {
+        return None;
+    }
+    let interval_seconds = components
+        .next()
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(0)
+        .min(24 * 60 * 60);
+    let fields = components
+        .next()
+        .map(|value| {
+            value
+                .split('|')
+                .filter(|field| !field.is_empty())
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+    Some(MicronBlock::Partial {
+        target: target.to_string(),
+        interval_seconds,
+        fields,
+    })
+}
+
 fn push_text(output: &mut Vec<Inline>, text: &mut String, style: &MicronStyle) {
     if !text.is_empty() {
         output.push(Inline::Text {
@@ -698,6 +736,25 @@ mod tests {
                 max_width: Some(30),
                 ..
             }
+        ));
+    }
+
+    #[test]
+    fn parses_refreshing_partial_with_fields() {
+        let page = parse_page(
+            "node:/page/partial.mu".into(),
+            b"`{11111111111111111111111111111111:/page/status.mu`10`pid=32|user_name}\n",
+            false,
+        )
+        .unwrap();
+        assert!(matches!(
+            &page.blocks[0],
+            MicronBlock::Partial {
+                target,
+                interval_seconds: 10,
+                fields,
+            } if target.ends_with("/page/status.mu")
+                && fields == &["pid=32", "user_name"]
         ));
     }
 }

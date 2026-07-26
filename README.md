@@ -39,6 +39,9 @@ The current development slice provides:
 - Micron text/password inputs, checkbox and radio controls;
 - compatible form submission using `field_*` and `var_*` MessagePack request
   keys, including submit-all and fixed link variables;
+- isolated asynchronous Micron partials with field forwarding, independent
+  page requests, bounded refresh intervals, and timer cancellation on
+  navigation;
 - an rsRRCD-compatible RRC v1 CBOR codec for HELLO/WELCOME, room lifecycle,
   messages, actions, notices, PING/PONG, errors, and Resource envelopes;
 - a multi-hub RRC session manager with Link identification, HELLO/WELCOME,

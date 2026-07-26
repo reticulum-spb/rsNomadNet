@@ -4,7 +4,7 @@ const state = {
   conversations: [],
   directory: [],
   activeConversation: null,
-  browser: { history: [], position: -1, page: null },
+  browser: { history: [], position: -1, page: null, partialTimers: [], generation: 0 },
   rrc: {
     hubs: new Map(), activeHub: null, activeRoom: null, messages: [],
     availableRooms: new Map(), roomListsLoaded: new Set(), usersByRoom: new Map(),
@@ -443,15 +443,9 @@ function collectMicronFields(names) {
   return fields;
 }
 
-function renderBrowserPage(page) {
-  state.browser.page = page;
-  $("#browser-address").value = page.url;
-  $("#browser-status").textContent = `${page.from_cache ? "Cached" : "Received"} · ${page.blocks.length} blocks`;
-  const container = $("#browser-page");
-  container.style.color = page.foreground || "";
-  container.style.backgroundColor = page.background || "";
-  const fragment = document.createDocumentFragment();
-  for (const block of page.blocks) {
+function renderMicronBlocks(blocks, container, generation) {
+  const elements = [];
+  for (const block of blocks) {
     let element;
     if (block.type === "heading") {
       element = document.createElement(`h${Math.min(6, block.depth)}`);
@@ -487,6 +481,11 @@ function renderBrowserPage(page) {
       }
       element.append(body);
       if (block.max_width) element.style.maxWidth = `${block.max_width}ch`;
+    } else if (block.type === "partial") {
+      element = document.createElement("div");
+      element.className = "micron-partial";
+      element.textContent = "Loading partial…";
+      window.setTimeout(() => loadMicronPartial(element, block, generation), 0);
     }
     if (element) {
       if (block.alignment) element.style.textAlign = block.alignment;
@@ -496,10 +495,52 @@ function renderBrowserPage(page) {
       } else if (block.type === "table" && block.alignment === "right") {
         element.style.marginInlineStart = "auto";
       }
-      fragment.append(element);
+      elements.push(element);
     }
   }
-  container.replaceChildren(fragment);
+  container.replaceChildren(...elements);
+}
+
+async function loadMicronPartial(container, block, generation) {
+  if (generation !== state.browser.generation || !container.isConnected) return;
+  try {
+    const response = await fetch("/api/v1/browser/fetch", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        url: resolveBrowserTarget(block.target),
+        reload: true,
+        fields: collectMicronFields(block.fields || []),
+      }),
+    });
+    const page = await response.json();
+    if (!response.ok) throw new Error(page.error || "Partial request failed");
+    if (generation !== state.browser.generation || !container.isConnected) return;
+    renderMicronBlocks(page.blocks, container, generation);
+    if (block.interval_seconds > 0) {
+      const timer = window.setTimeout(
+        () => loadMicronPartial(container, block, generation),
+        block.interval_seconds * 1000,
+      );
+      state.browser.partialTimers.push(timer);
+    }
+  } catch (error) {
+    container.classList.add("failed");
+    container.textContent = error.message;
+  }
+}
+
+function renderBrowserPage(page) {
+  for (const timer of state.browser.partialTimers) window.clearTimeout(timer);
+  state.browser.partialTimers = [];
+  state.browser.generation += 1;
+  state.browser.page = page;
+  $("#browser-address").value = page.url;
+  $("#browser-status").textContent = `${page.from_cache ? "Cached" : "Received"} · ${page.blocks.length} blocks`;
+  const container = $("#browser-page");
+  container.style.color = page.foreground || "";
+  container.style.backgroundColor = page.background || "";
+  renderMicronBlocks(page.blocks, container, state.browser.generation);
   document.title = page.title ? `${page.title} · rsNomadNet` : "rsNomadNet";
   updateBrowserControls();
 }
