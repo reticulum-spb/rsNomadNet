@@ -80,11 +80,46 @@ pub struct DownloadedFile {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum MicronBlock {
-    Heading { depth: u8, parts: Vec<Inline> },
-    Paragraph { parts: Vec<Inline> },
-    Divider,
-    Preformatted { text: String },
-    Table { rows: Vec<Vec<Vec<Inline>>> },
+    Heading {
+        depth: u8,
+        alignment: Alignment,
+        parts: Vec<Inline>,
+    },
+    Paragraph {
+        depth: u8,
+        alignment: Alignment,
+        parts: Vec<Inline>,
+    },
+    Divider {
+        depth: u8,
+        character: char,
+    },
+    Preformatted {
+        text: String,
+    },
+    Table {
+        alignment: Alignment,
+        max_width: Option<u16>,
+        rows: Vec<Vec<Vec<Inline>>>,
+    },
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Alignment {
+    #[default]
+    Left,
+    Center,
+    Right,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MicronStyle {
+    pub foreground: Option<String>,
+    pub background: Option<String>,
+    pub bold: bool,
+    pub underline: bool,
+    pub italic: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -92,29 +127,37 @@ pub enum MicronBlock {
 pub enum Inline {
     Text {
         text: String,
+        style: MicronStyle,
     },
     Link {
         label: String,
         target: String,
         fields: Vec<String>,
+        style: MicronStyle,
     },
     Input {
         name: String,
         value: String,
         width: u16,
         masked: bool,
+        style: MicronStyle,
     },
     Checkbox {
         name: String,
         value: String,
         label: String,
         checked: bool,
+        style: MicronStyle,
     },
     Radio {
         name: String,
         value: String,
         label: String,
         checked: bool,
+        style: MicronStyle,
+    },
+    Anchor {
+        name: String,
     },
 }
 
@@ -130,6 +173,11 @@ pub fn parse_page(
     let mut blocks = Vec::new();
     let mut literal = false;
     let mut table_rows: Option<Vec<Vec<Vec<Inline>>>> = None;
+    let mut table_alignment = Alignment::Left;
+    let mut table_max_width = None;
+    let mut alignment = Alignment::Left;
+    let mut depth = 0u8;
+    let mut style = MicronStyle::default();
 
     for line in source.lines() {
         if let Some(value) = line.strip_prefix("#!c=") {
@@ -148,12 +196,33 @@ pub fn parse_page(
             literal = !literal;
             continue;
         }
-        if line.starts_with("`t") {
+        if let Some(options) = line.strip_prefix("`t") {
             if let Some(rows) = table_rows.take() {
                 if !rows.is_empty() {
-                    blocks.push(MicronBlock::Table { rows });
+                    blocks.push(MicronBlock::Table {
+                        alignment: table_alignment,
+                        max_width: table_max_width,
+                        rows,
+                    });
                 }
             } else {
+                let mut options = options.trim();
+                table_alignment = match options.chars().next() {
+                    Some('c') => {
+                        options = &options[1..];
+                        Alignment::Center
+                    }
+                    Some('r') => {
+                        options = &options[1..];
+                        Alignment::Right
+                    }
+                    Some('l') => {
+                        options = &options[1..];
+                        Alignment::Left
+                    }
+                    _ => alignment,
+                };
+                table_max_width = options.parse::<u16>().ok().map(|width| width.clamp(1, 512));
                 table_rows = Some(Vec::new());
             }
             continue;
@@ -163,7 +232,7 @@ pub fn parse_page(
                 line.trim()
                     .trim_matches('|')
                     .split('|')
-                    .map(|cell| parse_inline(cell.trim()))
+                    .map(|cell| parse_inline(cell.trim(), &mut style))
                     .collect(),
             );
             continue;
@@ -177,32 +246,78 @@ pub fn parse_page(
         if line.starts_with('#') {
             continue;
         }
-        if line == "-" || (line.len() == 2 && line.starts_with('-')) {
-            blocks.push(MicronBlock::Divider);
+        if line.starts_with('-') {
+            blocks.push(MicronBlock::Divider {
+                depth,
+                character: line.chars().nth(1).unwrap_or('─'),
+            });
             continue;
         }
-        let depth = line
+        let heading_depth = line
             .chars()
             .take_while(|character| *character == '>')
             .count();
-        let content = if depth > 0 { &line[depth..] } else { line };
+        if heading_depth > 0 {
+            depth = heading_depth.min(255) as u8;
+        }
+        let mut content = if heading_depth > 0 {
+            &line[heading_depth..]
+        } else {
+            line
+        };
+        if heading_depth == 0
+            && let Some(reset) = content.strip_prefix('<')
+        {
+            depth = 0;
+            content = reset;
+        }
+        if heading_depth == 0 {
+            match content.get(..2) {
+                Some("`c") => {
+                    alignment = Alignment::Center;
+                    content = &content[2..];
+                }
+                Some("`r") => {
+                    alignment = Alignment::Right;
+                    content = &content[2..];
+                }
+                Some("`l") => {
+                    alignment = Alignment::Left;
+                    content = &content[2..];
+                }
+                Some("`a") => {
+                    alignment = Alignment::Left;
+                    content = &content[2..];
+                }
+                _ => {}
+            }
+        }
         if content.is_empty() {
             continue;
         }
-        let parts = parse_inline(content);
-        if depth > 0 {
+        let parts = parse_inline(content, &mut style);
+        if heading_depth > 0 {
             blocks.push(MicronBlock::Heading {
-                depth: depth.min(6) as u8,
+                depth,
+                alignment,
                 parts,
             });
         } else {
-            blocks.push(MicronBlock::Paragraph { parts });
+            blocks.push(MicronBlock::Paragraph {
+                depth,
+                alignment,
+                parts,
+            });
         }
     }
     if let Some(rows) = table_rows
         && !rows.is_empty()
     {
-        blocks.push(MicronBlock::Table { rows });
+        blocks.push(MicronBlock::Table {
+            alignment: table_alignment,
+            max_width: table_max_width,
+            rows,
+        });
     }
     let title = blocks.iter().find_map(|block| match block {
         MicronBlock::Heading { parts, .. } => Some(inline_text(parts)),
@@ -219,29 +334,31 @@ pub fn parse_page(
     })
 }
 
-fn parse_inline(line: &str) -> Vec<Inline> {
+fn parse_inline(line: &str, style: &mut MicronStyle) -> Vec<Inline> {
     let characters: Vec<char> = line.chars().collect();
     let mut output = Vec::new();
     let mut text = String::new();
     let mut index = 0;
-    let mut formatting = false;
     while index < characters.len() {
-        if characters[index] == '`' {
-            formatting = true;
+        if characters[index] == '\\' && index + 1 < characters.len() {
+            text.push(characters[index + 1]);
+            index += 2;
+            continue;
+        }
+        if characters[index] != '`' || index + 1 >= characters.len() {
+            text.push(characters[index]);
             index += 1;
             continue;
         }
-        if formatting && characters[index] == '[' {
-            if let Some(relative_end) = characters[index + 1..]
+        let command_index = index + 1;
+        let command = characters[command_index];
+        if command == '[' {
+            if let Some(relative_end) = characters[command_index + 1..]
                 .iter()
                 .position(|character| *character == ']')
             {
-                if !text.is_empty() {
-                    output.push(Inline::Text {
-                        text: std::mem::take(&mut text),
-                    });
-                }
-                let value: String = characters[index + 1..index + 1 + relative_end]
+                push_text(&mut output, &mut text, style);
+                let value: String = characters[command_index + 1..command_index + 1 + relative_end]
                     .iter()
                     .collect();
                 let mut components = value.split('`');
@@ -266,57 +383,81 @@ fn parse_inline(line: &str) -> Vec<Inline> {
                         label: if label.is_empty() { target } else { label }.to_string(),
                         target: target.to_string(),
                         fields,
+                        style: style.clone(),
                     });
                 }
-                index += relative_end + 2;
-                formatting = false;
+                index = command_index + relative_end + 2;
                 continue;
             }
         }
-        if formatting
-            && characters[index] == '<'
-            && let Some((field, consumed)) = parse_field(&characters[index..])
+        if command == '<'
+            && let Some((field, consumed)) = parse_field(&characters[command_index..], style)
         {
-            if !text.is_empty() {
-                output.push(Inline::Text {
-                    text: std::mem::take(&mut text),
-                });
-            }
+            push_text(&mut output, &mut text, style);
             output.push(field);
-            index += consumed;
-            formatting = false;
+            index += consumed + 1;
             continue;
         }
-        if formatting {
-            let command = characters[index];
-            let skip = match command {
-                'F' | 'B' if characters.get(index + 1) == Some(&'T') => 8,
-                'F' | 'B' => 4,
-                ':' => {
-                    let mut length = 1;
-                    while characters.get(index + length).is_some_and(|character| {
-                        character.is_ascii_alphanumeric() || matches!(character, '_' | '-')
-                    }) {
-                        length += 1;
+        push_text(&mut output, &mut text, style);
+        match command {
+            '!' => style.bold = !style.bold,
+            '_' => style.underline = !style.underline,
+            '*' => style.italic = !style.italic,
+            'f' => style.foreground = None,
+            'b' => style.background = None,
+            '`' => *style = MicronStyle::default(),
+            'F' | 'B' => {
+                let true_colour = characters.get(command_index + 1) == Some(&'T');
+                let colour_start = command_index + if true_colour { 2 } else { 1 };
+                let colour_length = if true_colour { 6 } else { 3 };
+                if colour_start + colour_length <= characters.len() {
+                    let colour: String = characters[colour_start..colour_start + colour_length]
+                        .iter()
+                        .collect();
+                    if let Some(colour) = valid_colour(&colour) {
+                        if command == 'F' {
+                            style.foreground = Some(colour);
+                        } else {
+                            style.background = Some(colour);
+                        }
+                        index = colour_start + colour_length;
+                        continue;
                     }
-                    length
                 }
-                _ => 1,
-            };
-            index = (index + skip).min(characters.len());
-            formatting = false;
-            continue;
+            }
+            ':' => {
+                let mut end = command_index + 1;
+                while characters.get(end).is_some_and(|character| {
+                    character.is_ascii_alphanumeric() || matches!(character, '_' | '-')
+                }) {
+                    end += 1;
+                }
+                if end > command_index + 1 {
+                    output.push(Inline::Anchor {
+                        name: characters[command_index + 1..end].iter().collect(),
+                    });
+                }
+                index = end;
+                continue;
+            }
+            _ => {}
         }
-        text.push(characters[index]);
-        index += 1;
+        index += 2;
     }
-    if !text.is_empty() {
-        output.push(Inline::Text { text });
-    }
+    push_text(&mut output, &mut text, style);
     output
 }
 
-fn parse_field(characters: &[char]) -> Option<(Inline, usize)> {
+fn push_text(output: &mut Vec<Inline>, text: &mut String, style: &MicronStyle) {
+    if !text.is_empty() {
+        output.push(Inline::Text {
+            text: std::mem::take(text),
+            style: style.clone(),
+        });
+    }
+}
+
+fn parse_field(characters: &[char], style: &MicronStyle) -> Option<(Inline, usize)> {
     let tick = characters.iter().position(|character| *character == '`')?;
     let end = characters
         .iter()
@@ -348,6 +489,7 @@ fn parse_field(characters: &[char]) -> Option<(Inline, usize)> {
             value,
             label,
             checked,
+            style: style.clone(),
         }
     } else if flags.contains('^') {
         Inline::Radio {
@@ -355,6 +497,7 @@ fn parse_field(characters: &[char]) -> Option<(Inline, usize)> {
             value,
             label,
             checked,
+            style: style.clone(),
         }
     } else {
         let width = flags
@@ -369,6 +512,7 @@ fn parse_field(characters: &[char]) -> Option<(Inline, usize)> {
             value: label,
             width,
             masked: flags.contains('!'),
+            style: style.clone(),
         }
     };
     Some((field, end + 1))
@@ -407,10 +551,11 @@ fn inline_text(parts: &[Inline]) -> String {
     parts
         .iter()
         .map(|part| match part {
-            Inline::Text { text } => text.as_str(),
+            Inline::Text { text, .. } => text.as_str(),
             Inline::Link { label, .. } => label.as_str(),
             Inline::Input { value, .. } => value.as_str(),
             Inline::Checkbox { label, .. } | Inline::Radio { label, .. } => label.as_str(),
+            Inline::Anchor { .. } => "",
         })
         .collect()
 }
@@ -453,7 +598,7 @@ mod tests {
             false,
         )
         .unwrap();
-        let MicronBlock::Table { rows } = &page.blocks[0] else {
+        let MicronBlock::Table { rows, .. } = &page.blocks[0] else {
             panic!("expected table");
         };
         assert_eq!(rows.len(), 2);
@@ -468,14 +613,14 @@ mod tests {
             false,
         )
         .unwrap();
-        let MicronBlock::Paragraph { parts } = &page.blocks[0] else {
+        let MicronBlock::Paragraph { parts, .. } = &page.blocks[0] else {
             panic!("expected paragraph");
         };
         assert!(matches!(
             &parts[1],
             Inline::Input { name, value, .. } if name == "name" && value == "Alice"
         ));
-        let MicronBlock::Paragraph { parts } = &page.blocks[2] else {
+        let MicronBlock::Paragraph { parts, .. } = &page.blocks[2] else {
             panic!("expected submit paragraph");
         };
         assert!(matches!(
@@ -492,19 +637,67 @@ mod tests {
             false,
         )
         .unwrap();
-        let MicronBlock::Paragraph { parts } = &page.blocks[1] else {
+        let MicronBlock::Paragraph { parts, .. } = &page.blocks[1] else {
             panic!("expected field paragraph");
         };
         assert!(matches!(
             &parts[1],
             Inline::Input { name, value, .. } if name == "username" && value == "Anonymous"
         ));
-        let MicronBlock::Paragraph { parts } = &page.blocks[2] else {
+        let MicronBlock::Paragraph { parts, .. } = &page.blocks[2] else {
             panic!("expected submit paragraph");
         };
         assert!(matches!(
             &parts[0],
             Inline::Link { fields, .. } if fields == &["*"]
+        ));
+    }
+
+    #[test]
+    fn preserves_inline_styles_alignment_sections_and_anchors() {
+        let page = parse_page(
+            "node:/page/style.mu".into(),
+            b"`c`Ff00`!Bold`! plain\n>>Nested\n`:note anchored\n<Back\n",
+            false,
+        )
+        .unwrap();
+        let MicronBlock::Paragraph {
+            alignment, parts, ..
+        } = &page.blocks[0]
+        else {
+            panic!("expected styled paragraph");
+        };
+        assert_eq!(*alignment, Alignment::Center);
+        assert!(matches!(
+            &parts[0],
+            Inline::Text { text, style }
+                if text == "Bold" && style.bold && style.foreground.as_deref() == Some("#ff0000")
+        ));
+        let MicronBlock::Heading { depth, .. } = &page.blocks[1] else {
+            panic!("expected nested heading");
+        };
+        assert_eq!(*depth, 2);
+        let MicronBlock::Paragraph { depth, parts, .. } = &page.blocks[2] else {
+            panic!("expected nested anchor");
+        };
+        assert_eq!(*depth, 2);
+        assert!(matches!(&parts[0], Inline::Anchor { name } if name == "note"));
+        let MicronBlock::Paragraph { depth, .. } = &page.blocks[3] else {
+            panic!("expected reset paragraph");
+        };
+        assert_eq!(*depth, 0);
+    }
+
+    #[test]
+    fn parses_table_alignment_and_width() {
+        let page = parse_page("node:/page/table.mu".into(), b"`tc30\nA | B\n`t\n", false).unwrap();
+        assert!(matches!(
+            &page.blocks[0],
+            MicronBlock::Table {
+                alignment: Alignment::Center,
+                max_width: Some(30),
+                ..
+            }
         ));
     }
 }

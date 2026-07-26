@@ -348,14 +348,24 @@ function resolveBrowserTarget(target) {
 function renderInline(parts, parent) {
   for (const part of parts) {
     if (part.type === "text") {
-      parent.append(document.createTextNode(part.text));
+      const text = document.createElement("span");
+      text.textContent = part.text;
+      applyMicronStyle(text, part.style);
+      parent.append(text);
     } else if (part.type === "link") {
       const link = document.createElement("button");
       link.className = "micron-link";
       link.textContent = part.label;
+      applyMicronStyle(link, part.style);
       link.addEventListener("click", () => {
         const target = resolveBrowserTarget(part.target);
-        if (target.slice(32).startsWith(":/file/")) {
+        if (target.startsWith("#")) {
+          const anchor = target.slice(1);
+          const element = anchor
+            ? document.getElementById(`micron-${anchor}`)
+            : link.closest("p, h1, h2, h3, h4, h5, h6")?.nextElementSibling;
+          element?.scrollIntoView({ behavior: "smooth", block: "start" });
+        } else if (target.slice(32).startsWith(":/file/")) {
           downloadBrowserFile(target);
         } else {
           navigateBrowser(target, { fields: collectMicronFields(part.fields || []) });
@@ -371,6 +381,7 @@ function renderInline(parts, parent) {
       input.value = part.value;
       input.style.width = `${Math.min(256, Math.max(1, part.width))}ch`;
       input.autocomplete = "off";
+      applyMicronStyle(input, part.style);
       parent.append(input);
     } else if (part.type === "checkbox" || part.type === "radio") {
       const wrapper = document.createElement("label");
@@ -381,10 +392,28 @@ function renderInline(parts, parent) {
       input.dataset.micronField = part.name;
       input.value = part.value;
       input.checked = part.checked;
+      applyMicronStyle(wrapper, part.style);
       wrapper.append(input, document.createTextNode(part.label));
       parent.append(wrapper);
+    } else if (part.type === "anchor") {
+      const anchor = document.createElement("span");
+      anchor.id = `micron-${part.name}`;
+      anchor.className = "micron-anchor";
+      parent.append(anchor);
     }
   }
+}
+
+function applyMicronStyle(element, style = {}) {
+  if (style.foreground) element.style.color = style.foreground;
+  if (style.background) element.style.backgroundColor = style.background;
+  if (style.bold) element.style.fontWeight = "700";
+  if (style.underline) element.style.textDecoration = "underline";
+  if (style.italic) element.style.fontStyle = "italic";
+}
+
+function micronSlug(value) {
+  return value.toLocaleLowerCase().replace(/[^\p{L}\p{N}]+/gu, "-").replace(/^-|-$/g, "");
 }
 
 function collectMicronFields(names) {
@@ -427,11 +456,19 @@ function renderBrowserPage(page) {
     if (block.type === "heading") {
       element = document.createElement(`h${Math.min(6, block.depth)}`);
       renderInline(block.parts, element);
+      const slug = micronSlug(element.textContent);
+      if (slug && !document.getElementById(`micron-${slug}`)) element.id = `micron-${slug}`;
     } else if (block.type === "paragraph") {
       element = document.createElement("p");
       renderInline(block.parts, element);
     } else if (block.type === "divider") {
-      element = document.createElement("hr");
+      if (block.character === "─") {
+        element = document.createElement("hr");
+      } else {
+        element = document.createElement("div");
+        element.className = "micron-divider";
+        element.textContent = block.character.repeat(128);
+      }
     } else if (block.type === "preformatted") {
       element = document.createElement("pre");
       element.textContent = block.text;
@@ -449,8 +486,18 @@ function renderBrowserPage(page) {
         body.append(tableRow);
       }
       element.append(body);
+      if (block.max_width) element.style.maxWidth = `${block.max_width}ch`;
     }
-    if (element) fragment.append(element);
+    if (element) {
+      if (block.alignment) element.style.textAlign = block.alignment;
+      if (block.depth > 1) element.style.marginInlineStart = `${(block.depth - 1) * 4}ch`;
+      if (block.type === "table" && block.alignment === "center") {
+        element.style.marginInline = "auto";
+      } else if (block.type === "table" && block.alignment === "right") {
+        element.style.marginInlineStart = "auto";
+      }
+      fragment.append(element);
+    }
   }
   container.replaceChildren(fragment);
   document.title = page.title ? `${page.title} · rsNomadNet` : "rsNomadNet";

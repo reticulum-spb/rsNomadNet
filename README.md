@@ -29,8 +29,9 @@ The current development slice provides:
 - a persistent directory of peers, remote NomadNet nodes, and propagation
   nodes;
 - remote `/page/` requests over Reticulum Link, including Resource responses;
-- a safe Micron-to-AST renderer with headings, text, links, dividers,
-  preformatted blocks, page colours, and cache headers;
+- a safe Micron-to-AST renderer with nested sections, alignment, inline
+  formatting and colours, links and anchors, styled dividers, preformatted
+  blocks, page colours, table sizing, and cache headers;
 - page cache, browser history, navigation, and reload;
 - remote `/file/` downloads with Resource support, safe filenames, and a
   64 MiB client-side limit;

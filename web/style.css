@@ -143,6 +143,8 @@ td.offline { color: var(--danger); }
 .browser-page .micron-table { width: auto; max-width: 100%; margin: 1em 0; border: 1px solid currentColor; border-collapse: collapse; overflow-x: auto; }
 .browser-page .micron-table td { padding: .35em .7em; border: 1px solid currentColor; color: inherit; font: inherit; white-space: pre-wrap; }
 .micron-link { display: inline; padding: 0; color: var(--accent); border: 0; background: none; text-decoration: underline; cursor: pointer; }
+.micron-anchor { position: relative; top: -8px; }
+.micron-divider { max-width: 100%; color: currentColor; overflow: hidden; white-space: nowrap; opacity: .6; }
 .micron-input { display: inline-block; max-width: 100%; margin: 0 .25ch; padding: .1em .35em; color: inherit; border: 1px solid currentColor; border-radius: 2px; outline: none; background: #0003; font: inherit; }
 .micron-input:focus { box-shadow: 0 0 0 2px var(--accent-dim); }
 .micron-choice { display: inline-flex; align-items: center; gap: .5ch; margin: 0 1ch 0 0; color: inherit; cursor: pointer; }
