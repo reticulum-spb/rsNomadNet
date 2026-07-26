@@ -10,6 +10,7 @@
 <body>
   <div class="shell">
     <header class="topbar">
+      <button class="mobile-menu" id="mobile-menu" aria-label="Open navigation" aria-expanded="false">☰</button>
       <a class="brand" href="/" aria-label="rsNomadNet home">
         <span class="brand-mark">N</span>
         <span>rsNomadNet</span>
@@ -66,8 +67,14 @@
             </div>
             <div class="message-thread" id="message-thread" hidden>
               <header>
-                <strong id="thread-name"></strong>
-                <code id="thread-hash"></code>
+                <div class="thread-identity">
+                  <strong id="thread-name"></strong>
+                  <code id="thread-hash"></code>
+                </div>
+                <div class="thread-actions">
+                  <input id="message-search" type="search" placeholder="Search conversation" aria-label="Search conversation">
+                  <button type="button" class="secondary danger" id="clear-conversation">Delete history</button>
+                </div>
               </header>
               <div class="message-list" id="message-list"></div>
               <form class="message-compose" id="message-compose">

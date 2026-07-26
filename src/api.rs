@@ -27,7 +27,18 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/v1/state", get(snapshot))
         .route("/api/v1/conversations", get(conversations))
         .route("/api/v1/directory", get(directory))
-        .route("/api/v1/conversations/{destination_hash}", get(messages))
+        .route(
+            "/api/v1/conversations/{destination_hash}",
+            get(messages).delete(clear_conversation),
+        )
+        .route(
+            "/api/v1/conversations/{destination_hash}/read",
+            post(mark_conversation_read),
+        )
+        .route(
+            "/api/v1/drafts/{scope}/{target}",
+            get(get_draft).put(save_draft),
+        )
         .route("/api/v1/messages", post(send_message))
         .route("/api/v1/browser/fetch", post(fetch_page))
         .route("/api/v1/browser/download", post(download_file))
@@ -581,6 +592,7 @@ async fn directory(State(state): State<Arc<AppState>>) -> Response {
 async fn messages(
     State(state): State<Arc<AppState>>,
     Path(destination_hash): Path<String>,
+    Query(query): Query<MessageQuery>,
 ) -> Response {
     if parse_hash(&destination_hash).is_err() {
         return (
@@ -589,8 +601,126 @@ async fn messages(
         )
             .into_response();
     }
-    match state.database.messages(&destination_hash.to_lowercase()) {
+    let destination_hash = destination_hash.to_lowercase();
+    let result = match query
+        .q
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        Some(query) => state.database.search_messages(&destination_hash, query),
+        None => state.database.messages(&destination_hash),
+    };
+    match result {
         Ok(value) => Json(value).into_response(),
+        Err(error) => internal_error(error),
+    }
+}
+
+#[derive(Default, serde::Deserialize)]
+struct MessageQuery {
+    q: Option<String>,
+}
+
+async fn mark_conversation_read(
+    State(state): State<Arc<AppState>>,
+    Path(destination_hash): Path<String>,
+) -> Response {
+    if parse_hash(&destination_hash).is_err() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "invalid destination hash"})),
+        )
+            .into_response();
+    }
+    match state
+        .database
+        .mark_conversation_read(&destination_hash.to_lowercase())
+    {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(error) => internal_error(error),
+    }
+}
+
+async fn clear_conversation(
+    State(state): State<Arc<AppState>>,
+    Path(destination_hash): Path<String>,
+) -> Response {
+    if parse_hash(&destination_hash).is_err() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "invalid destination hash"})),
+        )
+            .into_response();
+    }
+    let destination_hash = destination_hash.to_lowercase();
+    match state.database.conversation_has_pending(&destination_hash) {
+        Ok(true) => {
+            return (
+                StatusCode::CONFLICT,
+                Json(json!({"error": "conversation has messages awaiting delivery"})),
+            )
+                .into_response();
+        }
+        Ok(false) => {}
+        Err(error) => return internal_error(error),
+    }
+    match state.database.clear_conversation(&destination_hash) {
+        Ok(deleted) => Json(json!({"deleted": deleted})).into_response(),
+        Err(error) => internal_error(error),
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct DraftRequest {
+    content: String,
+}
+
+fn valid_draft_target(scope: &str, target: &str) -> bool {
+    matches!(scope, "lxmf" | "rrc")
+        && !target.is_empty()
+        && target.len() <= 256
+        && !target.chars().any(char::is_control)
+}
+
+async fn get_draft(
+    State(state): State<Arc<AppState>>,
+    Path((scope, target)): Path<(String, String)>,
+) -> Response {
+    if !valid_draft_target(&scope, &target) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "invalid draft target"})),
+        )
+            .into_response();
+    }
+    match state.database.draft(&scope, &target) {
+        Ok(content) => Json(json!({"content": content.unwrap_or_default()})).into_response(),
+        Err(error) => internal_error(error),
+    }
+}
+
+async fn save_draft(
+    State(state): State<Arc<AppState>>,
+    Path((scope, target)): Path<(String, String)>,
+    Json(request): Json<DraftRequest>,
+) -> Response {
+    if !valid_draft_target(&scope, &target) || request.content.len() > 1024 * 1024 {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "invalid draft"})),
+        )
+            .into_response();
+    }
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64;
+    match state
+        .database
+        .save_draft(&scope, &target, &request.content, now)
+    {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(error) => internal_error(error),
     }
 }

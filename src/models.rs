@@ -65,8 +65,10 @@ pub struct MessageView {
     pub outbound: bool,
     pub state: String,
     pub delivery_method: String,
+    pub propagation_node: Option<String>,
     pub attempts: u32,
     pub last_error: Option<String>,
+    pub message_hash: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]

@@ -4,6 +4,8 @@ const state = {
   conversations: [],
   directory: [],
   activeConversation: null,
+  conversationMessages: [],
+  messageSearch: "",
   browser: {
     history: [], position: -1, page: null, partialTimers: [], generation: 0,
     navigationController: null, partialControllers: new Set(), failedAddress: null,
@@ -68,6 +70,41 @@ function rrcRoomKey(hubHash, room) {
 
 function markRrcRoomRead(hubHash, room) {
   if (hubHash && room) state.rrc.unreadRooms.delete(rrcRoomKey(hubHash, room));
+}
+
+const draftTimers = new Map();
+
+function draftTarget(scope, target) {
+  return target ? `/api/v1/drafts/${scope}/${encodeURIComponent(target)}` : null;
+}
+
+async function loadDraft(scope, target, input) {
+  const url = draftTarget(scope, target);
+  input.dataset.draftTarget = target || "";
+  if (!url) {
+    input.value = "";
+    return;
+  }
+  const response = await fetch(url);
+  if (!response.ok) return;
+  const body = await response.json();
+  if (input.dataset.draftTarget === target) input.value = body.content || "";
+}
+
+function queueDraft(scope, target, content) {
+  const url = draftTarget(scope, target);
+  if (!url) return;
+  const key = `${scope}:${target}`;
+  window.clearTimeout(draftTimers.get(key));
+  draftTimers.set(key, window.setTimeout(() => {
+    fetch(url, {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ content }),
+      keepalive: true,
+    }).catch(() => {});
+    draftTimers.delete(key);
+  }, 300));
 }
 
 function stageRrcCommand(command) {
@@ -243,7 +280,9 @@ function renderConversations() {
     const button = document.createElement("button");
     button.className = "message-peer-item";
     button.classList.toggle("active", state.activeConversation === conversation.destination_hash);
-    button.textContent = conversation.display_name || shortHash(conversation.destination_hash);
+    button.classList.toggle("unread", conversation.unread > 0);
+    const label = conversation.display_name || shortHash(conversation.destination_hash);
+    button.textContent = conversation.unread ? `${label} (${conversation.unread})` : label;
     button.title = `${conversation.destination_hash} · ${conversation.last_message || "No messages"}`;
     button.addEventListener("click", () => {
       switchView("messages");
@@ -339,6 +378,8 @@ function switchView(name) {
   state.view = name;
   $$(".nav-item").forEach((item) => item.classList.toggle("active", item.dataset.view === name));
   $$(".view").forEach((view) => view.classList.toggle("active", view.id === `view-${name}`));
+  $(".sidebar").classList.remove("open");
+  $("#mobile-menu").setAttribute("aria-expanded", "false");
 }
 
 function resolveBrowserTarget(target) {
@@ -713,15 +754,28 @@ async function loadDirectory() {
 
 async function openConversation(conversation) {
   state.activeConversation = conversation.destination_hash;
+  state.messageSearch = "";
+  $("#message-search").value = "";
   renderConversations();
   $("#message-compose-error").textContent = "";
   const response = await fetch(`/api/v1/conversations/${conversation.destination_hash}`);
   if (!response.ok) throw new Error("Could not load messages");
-  const messages = await response.json();
+  state.conversationMessages = await response.json();
   $("#conversation-empty").hidden = true;
   $("#message-thread").hidden = false;
   $("#thread-name").textContent = conversation.display_name || shortHash(conversation.destination_hash);
   $("#thread-hash").textContent = conversation.destination_hash;
+  renderConversationMessages();
+  await Promise.all([
+    fetch(`/api/v1/conversations/${conversation.destination_hash}/read`, { method: "POST" }),
+    loadDraft("lxmf", conversation.destination_hash, $("#message-body")),
+  ]);
+  conversation.unread = 0;
+  renderConversations();
+}
+
+function renderConversationMessages() {
+  const messages = state.conversationMessages;
   $("#message-list").replaceChildren(...messages.map((message) => {
     const article = document.createElement("article");
     article.className = `message ${message.outbound ? "outbound" : "inbound"}`;
@@ -731,8 +785,33 @@ async function openConversation(conversation) {
     const body = document.createElement("p");
     body.textContent = message.content;
     const meta = document.createElement("small");
-    meta.textContent = `${new Date(message.timestamp * 1000).toLocaleString()} · ${message.state.replaceAll("_", " ")}`;
-    article.append(title, body, meta);
+    const method = message.delivery_method === "incoming" ? "received" : message.delivery_method;
+    meta.textContent = `${new Date(message.timestamp * 1000).toLocaleString()} · ${message.state.replaceAll("_", " ")} · ${method}`;
+    const details = document.createElement("details");
+    const summary = document.createElement("summary");
+    summary.textContent = "Details";
+    const values = [
+      ["Message hash", message.message_hash],
+      ["Signature", message.outbound ? "local message" : (
+        message.state === "delivered" ? "valid" :
+          message.state === "invalid_signature" ? "invalid" : "source unknown"
+      )],
+      ["Timestamp", new Date(message.timestamp * 1000).toISOString()],
+      ["Delivery", message.delivery_method],
+      ["Attempts", String(message.attempts)],
+      ["Propagation node", message.propagation_node],
+      ["Last error", message.last_error],
+    ].filter(([, value]) => value);
+    const list = document.createElement("dl");
+    for (const [label, value] of values) {
+      const term = document.createElement("dt");
+      term.textContent = label;
+      const description = document.createElement("dd");
+      description.textContent = value;
+      list.append(term, description);
+    }
+    details.append(summary, list);
+    article.append(title, body, meta, details);
     return article;
   }));
   $("#message-list").scrollTop = $("#message-list").scrollHeight;
@@ -755,7 +834,22 @@ function connectEvents() {
     } else if (message.type === "message_stored") {
       loadConversations().then(() => {
         const conversation = state.conversations.find((item) => item.destination_hash === state.activeConversation);
-        if (conversation) openConversation(conversation);
+        if (conversation && state.view === "messages" && document.visibilityState === "visible") {
+          const query = state.messageSearch
+            ? `?q=${encodeURIComponent(state.messageSearch)}`
+            : "";
+          fetch(`/api/v1/conversations/${conversation.destination_hash}${query}`)
+            .then((response) => response.json())
+            .then((messages) => {
+              state.conversationMessages = messages;
+              renderConversationMessages();
+              return fetch(`/api/v1/conversations/${conversation.destination_hash}/read`, {
+                method: "POST",
+              });
+            })
+            .then(() => loadConversations())
+            .catch(() => {});
+        }
       });
     } else if (message.type === "directory_changed") {
       const entry = message.payload;
@@ -879,6 +973,12 @@ function renderRrc() {
   $("#rrc-body").placeholder = state.rrc.activeRoom
     ? "Message or /help"
     : "Server command, for example /help";
+  const rrcDraftTarget = state.rrc.activeHub
+    ? `${state.rrc.activeHub}:${state.rrc.activeRoom || "@hub"}`
+    : "";
+  if ($("#rrc-body").dataset.draftTarget !== rrcDraftTarget) {
+    loadDraft("rrc", rrcDraftTarget, $("#rrc-body")).catch(() => {});
+  }
   const roomButtons = rooms.map((room) => {
     const button = document.createElement("button");
     button.className = "rrc-room-tab";
@@ -1193,6 +1293,8 @@ $("#rrc-compose").addEventListener("submit", async (event) => {
   $("#rrc-error").textContent = "";
   if (await handleLocalRrcCommand(bodyText)) {
     $("#rrc-body").value = "";
+    const target = `${state.rrc.activeHub}:${state.rrc.activeRoom || "@hub"}`;
+    queueDraft("rrc", target, "");
     return;
   }
   if (bodyText.trim().toLowerCase() === "/help") {
@@ -1218,7 +1320,11 @@ $("#rrc-compose").addEventListener("submit", async (event) => {
   });
   const body = await response.json();
   if (!response.ok) $("#rrc-error").textContent = body.error;
-  else $("#rrc-body").value = "";
+  else {
+    $("#rrc-body").value = "";
+    const target = `${state.rrc.activeHub}:${state.rrc.activeRoom || "@hub"}`;
+    queueDraft("rrc", target, "");
+  }
 });
 
 $("#browser-go").addEventListener("click", () => navigateBrowser($("#browser-address").value));
@@ -1313,6 +1419,7 @@ $("#message-compose").addEventListener("submit", async (event) => {
     const body = await response.json();
     if (!response.ok) throw new Error(body.error || "Delivery failed");
     input.value = "";
+    queueDraft("lxmf", conversation.destination_hash, "");
     await loadConversations();
     const current = state.conversations.find(
       (item) => item.destination_hash === state.activeConversation,
@@ -1324,6 +1431,54 @@ $("#message-compose").addEventListener("submit", async (event) => {
   } finally {
     submit.disabled = false;
   }
+});
+
+$("#message-body").addEventListener("input", (event) => {
+  queueDraft("lxmf", state.activeConversation, event.target.value);
+});
+
+let searchTimer;
+$("#message-search").addEventListener("input", (event) => {
+  window.clearTimeout(searchTimer);
+  searchTimer = window.setTimeout(async () => {
+    if (!state.activeConversation) return;
+    state.messageSearch = event.target.value.trim();
+    const query = state.messageSearch ? `?q=${encodeURIComponent(state.messageSearch)}` : "";
+    const response = await fetch(`/api/v1/conversations/${state.activeConversation}${query}`);
+    if (!response.ok) return;
+    state.conversationMessages = await response.json();
+    renderConversationMessages();
+  }, 200);
+});
+
+$("#clear-conversation").addEventListener("click", async () => {
+  const destination = state.activeConversation;
+  if (!destination || !window.confirm("Delete this conversation's local history? This cannot be undone.")) {
+    return;
+  }
+  const response = await fetch(`/api/v1/conversations/${destination}`, { method: "DELETE" });
+  const body = await response.json();
+  if (!response.ok) {
+    $("#message-compose-error").textContent = body.error || "Could not delete conversation";
+    return;
+  }
+  state.activeConversation = null;
+  state.conversationMessages = [];
+  $("#message-thread").hidden = true;
+  $("#conversation-empty").hidden = false;
+  await loadConversations();
+});
+
+$("#rrc-body").addEventListener("input", (event) => {
+  const target = state.rrc.activeHub
+    ? `${state.rrc.activeHub}:${state.rrc.activeRoom || "@hub"}`
+    : null;
+  queueDraft("rrc", target, event.target.value);
+});
+
+$("#mobile-menu").addEventListener("click", () => {
+  const open = $(".sidebar").classList.toggle("open");
+  $("#mobile-menu").setAttribute("aria-expanded", String(open));
 });
 
 const composeDialog = $("#compose-dialog");

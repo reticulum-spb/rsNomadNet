@@ -133,6 +133,19 @@ impl Database {
             );
             CREATE INDEX IF NOT EXISTS known_destinations_kind_seen
                 ON known_destinations(kind, last_seen DESC);
+
+            CREATE TABLE IF NOT EXISTS conversation_state (
+                destination_hash TEXT PRIMARY KEY,
+                last_read_id INTEGER NOT NULL DEFAULT 0
+            );
+
+            CREATE TABLE IF NOT EXISTS drafts (
+                scope TEXT NOT NULL,
+                target TEXT NOT NULL,
+                content TEXT NOT NULL,
+                updated_at INTEGER NOT NULL,
+                PRIMARY KEY(scope, target)
+            );
             ",
         )?;
         ensure_column(&connection, "rrc_hubs", "nick", "TEXT")?;
@@ -504,7 +517,16 @@ impl Database {
         let connection = self.connection.lock().expect("database mutex poisoned");
         let mut statement = connection.prepare(
             "
-            SELECT m.destination_hash, c.display_name, m.content, m.timestamp
+            SELECT m.destination_hash, c.display_name, m.content, m.timestamp,
+                   COALESCE((
+                       SELECT COUNT(*) FROM messages unread
+                       WHERE unread.destination_hash = m.destination_hash
+                         AND unread.outbound = 0
+                         AND unread.id > COALESCE((
+                             SELECT last_read_id FROM conversation_state
+                             WHERE destination_hash = m.destination_hash
+                         ), 0)
+                   ), 0)
             FROM messages m
             JOIN (
                 SELECT destination_hash, MAX(id) AS last_id
@@ -520,7 +542,7 @@ impl Database {
                 display_name: row.get(1)?,
                 last_message: row.get(2)?,
                 last_activity: row.get(3)?,
-                unread: 0,
+                unread: row.get(4)?,
             })
         })?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
@@ -531,7 +553,8 @@ impl Database {
         let mut statement = connection.prepare(
             "
             SELECT id, destination_hash, source_hash, title, content,
-                   timestamp, outbound, state, delivery_method, attempts, last_error
+                   timestamp, outbound, state, delivery_method, propagation_node,
+                   attempts, last_error, message_hash
             FROM messages
             WHERE destination_hash = ?1
             ORDER BY timestamp, id
@@ -540,6 +563,126 @@ impl Database {
         )?;
         let rows = statement.query_map([destination_hash], map_message)?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    pub fn mark_conversation_read(&self, destination_hash: &str) -> anyhow::Result<()> {
+        let connection = self.connection.lock().expect("database mutex poisoned");
+        connection.execute(
+            "
+            INSERT INTO conversation_state(destination_hash, last_read_id)
+            VALUES (?1, COALESCE((
+                SELECT MAX(id) FROM messages WHERE destination_hash = ?1
+            ), 0))
+            ON CONFLICT(destination_hash) DO UPDATE SET
+                last_read_id = excluded.last_read_id
+            ",
+            [destination_hash],
+        )?;
+        Ok(())
+    }
+
+    pub fn draft(&self, scope: &str, target: &str) -> anyhow::Result<Option<String>> {
+        let connection = self.connection.lock().expect("database mutex poisoned");
+        let result = connection.query_row(
+            "SELECT content FROM drafts WHERE scope = ?1 AND target = ?2",
+            params![scope, target],
+            |row| row.get(0),
+        );
+        match result {
+            Ok(content) => Ok(Some(content)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    pub fn save_draft(
+        &self,
+        scope: &str,
+        target: &str,
+        content: &str,
+        updated_at: i64,
+    ) -> anyhow::Result<()> {
+        let connection = self.connection.lock().expect("database mutex poisoned");
+        if content.is_empty() {
+            connection.execute(
+                "DELETE FROM drafts WHERE scope = ?1 AND target = ?2",
+                params![scope, target],
+            )?;
+        } else {
+            connection.execute(
+                "
+                INSERT INTO drafts(scope, target, content, updated_at)
+                VALUES (?1, ?2, ?3, ?4)
+                ON CONFLICT(scope, target) DO UPDATE SET
+                    content = excluded.content, updated_at = excluded.updated_at
+                ",
+                params![scope, target, content, updated_at],
+            )?;
+        }
+        Ok(())
+    }
+
+    pub fn search_messages(
+        &self,
+        destination_hash: &str,
+        query: &str,
+    ) -> anyhow::Result<Vec<MessageView>> {
+        let connection = self.connection.lock().expect("database mutex poisoned");
+        let pattern = format!(
+            "%{}%",
+            query
+                .replace('\\', "\\\\")
+                .replace('%', "\\%")
+                .replace('_', "\\_")
+        );
+        let mut statement = connection.prepare(
+            "
+            SELECT id, destination_hash, source_hash, title, content,
+                   timestamp, outbound, state, delivery_method, propagation_node,
+                   attempts, last_error, message_hash
+            FROM messages
+            WHERE destination_hash = ?1
+              AND (title LIKE ?2 ESCAPE '\\' OR content LIKE ?2 ESCAPE '\\')
+            ORDER BY timestamp, id
+            LIMIT 500
+            ",
+        )?;
+        let rows = statement.query_map(params![destination_hash, pattern], map_message)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    pub fn clear_conversation(&self, destination_hash: &str) -> anyhow::Result<usize> {
+        let mut connection = self.connection.lock().expect("database mutex poisoned");
+        let transaction = connection.transaction()?;
+        let deleted = transaction.execute(
+            "DELETE FROM messages WHERE destination_hash = ?1",
+            [destination_hash],
+        )?;
+        transaction.execute(
+            "DELETE FROM conversation_state WHERE destination_hash = ?1",
+            [destination_hash],
+        )?;
+        transaction.execute(
+            "DELETE FROM drafts WHERE scope = 'lxmf' AND target = ?1",
+            [destination_hash],
+        )?;
+        transaction.commit()?;
+        Ok(deleted)
+    }
+
+    pub fn conversation_has_pending(&self, destination_hash: &str) -> anyhow::Result<bool> {
+        let connection = self.connection.lock().expect("database mutex poisoned");
+        let count: i64 = connection.query_row(
+            "
+            SELECT COUNT(*) FROM messages
+            WHERE destination_hash = ?1
+              AND outbound = 1
+              AND state IN ('queued', 'retrying', 'sending')
+            ",
+            [destination_hash],
+            |row| row.get(0),
+        )?;
+        Ok(count > 0)
     }
 
     #[allow(dead_code, reason = "used by the incoming LXMF slice")]
@@ -577,8 +720,10 @@ impl Database {
             outbound: message.outbound,
             state: message.state.into(),
             delivery_method: message.delivery_method.into(),
+            propagation_node: None,
             attempts: message.attempts,
             last_error: message.last_error.map(str::to_string),
+            message_hash: message.message_hash.map(str::to_string),
         })
     }
 
@@ -621,8 +766,10 @@ impl Database {
             outbound: true,
             state: message.state.into(),
             delivery_method: message.delivery_method.into(),
+            propagation_node: propagation_node.map(str::to_string),
             attempts: message.attempts,
             last_error: message.last_error.map(str::to_string),
+            message_hash: message.message_hash.map(str::to_string),
         })
     }
 
@@ -700,7 +847,8 @@ impl Database {
             .query_row(
                 "
                 SELECT id, destination_hash, source_hash, title, content,
-                       timestamp, outbound, state, delivery_method, attempts, last_error
+                       timestamp, outbound, state, delivery_method, propagation_node,
+                       attempts, last_error, message_hash
                 FROM messages WHERE id = ?1
                 ",
                 [id],
@@ -765,8 +913,10 @@ fn map_message(row: &rusqlite::Row<'_>) -> rusqlite::Result<MessageView> {
         outbound: row.get(6)?,
         state: row.get(7)?,
         delivery_method: row.get(8)?,
-        attempts: row.get(9)?,
-        last_error: row.get(10)?,
+        propagation_node: row.get(9)?,
+        attempts: row.get(10)?,
+        last_error: row.get(11)?,
+        message_hash: row.get(12)?,
     })
 }
 
@@ -815,6 +965,47 @@ mod tests {
         assert_eq!(database.messages("aa").unwrap()[0].content, "hello");
         assert!(database.message_hash_exists("01").unwrap());
         assert!(!database.message_hash_exists("02").unwrap());
+    }
+
+    #[test]
+    fn persists_unread_state_drafts_search_and_history_deletion() {
+        let database = Database::open(Path::new(":memory:")).unwrap();
+        for (content, timestamp) in [("first hello", 10), ("second note", 11)] {
+            database
+                .store_message(NewMessage {
+                    destination_hash: "aa",
+                    source_hash: "aa",
+                    title: "",
+                    content,
+                    timestamp,
+                    outbound: false,
+                    state: "delivered",
+                    delivery_method: "incoming",
+                    attempts: 0,
+                    next_attempt: 0,
+                    last_error: None,
+                    message_hash: None,
+                })
+                .unwrap();
+        }
+        assert_eq!(database.conversations().unwrap()[0].unread, 2);
+        database.mark_conversation_read("aa").unwrap();
+        assert_eq!(database.conversations().unwrap()[0].unread, 0);
+
+        database.save_draft("lxmf", "aa", "unfinished", 12).unwrap();
+        assert_eq!(
+            database.draft("lxmf", "aa").unwrap().as_deref(),
+            Some("unfinished")
+        );
+        database.save_draft("lxmf", "aa", "", 13).unwrap();
+        assert_eq!(database.draft("lxmf", "aa").unwrap(), None);
+
+        let found = database.search_messages("aa", "hello").unwrap();
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].content, "first hello");
+        assert_eq!(database.clear_conversation("aa").unwrap(), 2);
+        assert!(database.messages("aa").unwrap().is_empty());
+        assert!(database.conversations().unwrap().is_empty());
     }
 
     #[test]

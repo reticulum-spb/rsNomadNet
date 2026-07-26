@@ -22,8 +22,12 @@ The current development slice provides:
   store-and-forward downloads;
 - inbound deduplication across opportunistic, Direct, Resource, and propagated
   delivery paths;
-- persistent conversations, a compact navigation tree, quick replies, and a
-  full web message composer for new peers;
+- persistent conversations with durable unread counts and per-peer drafts, a
+  compact navigation tree, quick replies, and a full web message composer for
+  new peers;
+- conversation search, guarded local-history deletion, compact delivery
+  status, and optional technical details for message hashes, signatures,
+  timestamps, attempts, propagation nodes, and errors;
 - live and cached announce discovery for `lxmf.delivery`,
   `nomadnetwork.node`, and `lxmf.propagation`;
 - a persistent directory of peers, remote NomadNet nodes, and propagation
@@ -53,7 +57,7 @@ The current development slice provides:
 - persistent RRC hub profiles and message history; room keys intentionally
   remain session-only, matching NomadNet;
 - RRC connect, disconnect, room lifecycle, history API and a compact web chat
-  interface with hubs in the navigation tree;
+  interface with hubs in the navigation tree and per-room drafts;
 - typed RRC public-room and room-member discovery via LIST/WHO;
 - live structured RRC room topics, registration state, and modes with
   backwards-compatible fallback for hubs that do not advertise them;
@@ -105,6 +109,7 @@ lifecycle, interface statistics, directory discovery, persistent LXMF
 messaging, automatic/direct/opportunistic/propagated delivery, multi-hub RRC,
 and remote-page browsing are functional and have interoperability coverage.
 The browser supports the practical Micron Guide surface, forms, partials,
-anchors, cache control, Resource responses, and downloads. The next
-implementation stage is messaging UI polish, followed by broader reliability
-testing and release-oriented hardening.
+anchors, cache control, Resource responses, and downloads. Messaging includes
+durable unread state and drafts, searchable history, delivery details, and
+responsive navigation. The next implementation stage is RRC follow-up,
+followed by broader reliability testing and release-oriented hardening.
