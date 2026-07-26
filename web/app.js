@@ -22,6 +22,35 @@ const state = {
 const $ = (selector) => document.querySelector(selector);
 const $$ = (selector) => [...document.querySelectorAll(selector)];
 
+const fragment = new URLSearchParams(location.hash.replace(/^#/, ""));
+let authToken = fragment.get("access_token") || sessionStorage.getItem("rsnomadnet.auth") || "";
+let authPrompt = null;
+if (fragment.has("access_token")) {
+  sessionStorage.setItem("rsnomadnet.auth", authToken);
+  history.replaceState(null, "", `${location.pathname}${location.search}`);
+}
+
+async function requestAuthToken() {
+  if (!authPrompt) {
+    authPrompt = Promise.resolve(window.prompt("rsNomadNet access token") || "")
+      .then((token) => {
+        authToken = token.trim();
+        if (authToken) sessionStorage.setItem("rsnomadnet.auth", authToken);
+        return authToken;
+      })
+      .finally(() => { authPrompt = null; });
+  }
+  return authPrompt;
+}
+
+async function apiFetch(input, init = {}, retried = false) {
+  const headers = new Headers(init.headers || {});
+  if (authToken) headers.set("authorization", `Bearer ${authToken}`);
+  const response = await window.fetch(input, { ...init, headers });
+  if (response.status !== 401 || retried || !(await requestAuthToken())) return response;
+  return apiFetch(input, init, true);
+}
+
 function formatBytes(value) {
   if (!value) return "0 B";
   const units = ["B", "KB", "MB", "GB"];
@@ -85,7 +114,7 @@ async function loadDraft(scope, target, input) {
     input.value = "";
     return;
   }
-  const response = await fetch(url);
+  const response = await apiFetch(url);
   if (!response.ok) return;
   const body = await response.json();
   if (input.dataset.draftTarget === target) input.value = body.content || "";
@@ -97,7 +126,7 @@ function queueDraft(scope, target, content) {
   const key = `${scope}:${target}`;
   window.clearTimeout(draftTimers.get(key));
   draftTimers.set(key, window.setTimeout(() => {
-    fetch(url, {
+    apiFetch(url, {
       method: "PUT",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ content }),
@@ -201,7 +230,7 @@ async function handleLocalRrcCommand(text) {
       return true;
     }
     const nick = args.join(" ");
-    const response = await fetch("/api/v1/rrc/nick", {
+    const response = await apiFetch("/api/v1/rrc/nick", {
       method: "POST", headers: { "content-type": "application/json" },
       body: JSON.stringify({ destination_hash: state.rrc.activeHub, nick }),
     });
@@ -229,7 +258,7 @@ async function handleLocalRrcCommand(text) {
       $("#rrc-error").textContent = "Select a room to clear";
       return true;
     }
-    const response = await fetch("/api/v1/rrc/clear", {
+    const response = await apiFetch("/api/v1/rrc/clear", {
       method: "POST", headers: { "content-type": "application/json" },
       body: JSON.stringify({
         destination_hash: state.rrc.activeHub,
@@ -258,7 +287,7 @@ async function handleLocalRrcCommand(text) {
     state.rrc.pingingHubs.add(hubHash);
     $("#rrc-list-status").textContent = "Pinging hub…";
     try {
-      const response = await fetch("/api/v1/rrc/ping", {
+      const response = await apiFetch("/api/v1/rrc/ping", {
         method: "POST", headers: { "content-type": "application/json" },
         body: JSON.stringify({ destination_hash: hubHash }),
       });
@@ -314,7 +343,7 @@ function renderConversations() {
 }
 
 async function loadConversations() {
-  const response = await fetch("/api/v1/conversations");
+  const response = await apiFetch("/api/v1/conversations");
   if (!response.ok) throw new Error("Could not load conversations");
   state.conversations = await response.json();
   renderConversations();
@@ -438,7 +467,7 @@ function renderBrowserBookmarks() {
     remove.title = `Remove ${bookmark.name}`;
     remove.setAttribute("aria-label", `Remove bookmark ${bookmark.name}`);
     remove.addEventListener("click", async () => {
-      const response = await fetch("/api/v1/browser/bookmarks", {
+      const response = await apiFetch("/api/v1/browser/bookmarks", {
         method: "DELETE",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ url: bookmark.url }),
@@ -455,7 +484,7 @@ function renderBrowserBookmarks() {
 }
 
 async function loadBrowserBookmarks() {
-  const response = await fetch("/api/v1/browser/bookmarks");
+  const response = await apiFetch("/api/v1/browser/bookmarks");
   if (!response.ok) throw new Error("Could not load browser bookmarks");
   state.browser.bookmarks = await response.json();
   renderBrowserBookmarks();
@@ -677,7 +706,7 @@ async function loadMicronPartial(container, block, generation) {
   container.partialController = controller;
   state.browser.partialControllers.add(controller);
   try {
-    const response = await fetch("/api/v1/browser/fetch", {
+    const response = await apiFetch("/api/v1/browser/fetch", {
       method: "POST",
       headers: { "content-type": "application/json" },
       signal: controller.signal,
@@ -750,7 +779,7 @@ function renderBrowserError(message, address) {
 async function downloadBrowserFile(url) {
   $("#browser-status").textContent = "Requesting file…";
   try {
-    const response = await fetch("/api/v1/browser/download", {
+    const response = await apiFetch("/api/v1/browser/download", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ url }),
@@ -795,7 +824,7 @@ async function navigateBrowser(url, options = {}) {
   $("#browser-reload").hidden = true;
   $("#browser-status").textContent = "Discovering path and requesting page…";
   try {
-    const response = await fetch("/api/v1/browser/fetch", {
+    const response = await apiFetch("/api/v1/browser/fetch", {
       method: "POST",
       headers: { "content-type": "application/json" },
       signal: controller.signal,
@@ -841,7 +870,7 @@ async function navigateBrowser(url, options = {}) {
 }
 
 async function loadDirectory() {
-  const response = await fetch("/api/v1/directory");
+  const response = await apiFetch("/api/v1/directory");
   if (!response.ok) throw new Error("Could not load directory");
   state.directory = await response.json();
   $("#known-propagation-nodes").replaceChildren(...state.directory
@@ -861,7 +890,7 @@ async function openConversation(conversation) {
   $("#message-search").value = "";
   renderConversations();
   $("#message-compose-error").textContent = "";
-  const response = await fetch(`/api/v1/conversations/${conversation.destination_hash}`);
+  const response = await apiFetch(`/api/v1/conversations/${conversation.destination_hash}`);
   if (!response.ok) throw new Error("Could not load messages");
   state.conversationMessages = await response.json();
   $("#conversation-empty").hidden = true;
@@ -870,7 +899,7 @@ async function openConversation(conversation) {
   $("#thread-hash").textContent = conversation.destination_hash;
   renderConversationMessages();
   await Promise.all([
-    fetch(`/api/v1/conversations/${conversation.destination_hash}/read`, { method: "POST" }),
+    apiFetch(`/api/v1/conversations/${conversation.destination_hash}/read`, { method: "POST" }),
     loadDraft("lxmf", conversation.destination_hash, $("#message-body")),
   ]);
   conversation.unread = 0;
@@ -935,7 +964,7 @@ function renderConversationMessages() {
 }
 
 async function loadState() {
-  const response = await fetch("/api/v1/state");
+  const response = await apiFetch("/api/v1/state");
   if (!response.ok) throw new Error("Could not load application state");
   const body = await response.json();
   renderNetwork(body.network);
@@ -943,7 +972,8 @@ async function loadState() {
 
 function connectEvents() {
   const protocol = location.protocol === "https:" ? "wss" : "ws";
-  const socket = new WebSocket(`${protocol}://${location.host}/api/v1/events`);
+  const protocols = authToken ? ["rsnomadnet", `bearer.${authToken}`] : ["rsnomadnet"];
+  const socket = new WebSocket(`${protocol}://${location.host}/api/v1/events`, protocols);
   socket.addEventListener("message", (event) => {
     const message = JSON.parse(event.data);
     if (message.type === "snapshot" || message.type === "network_changed") {
@@ -955,12 +985,12 @@ function connectEvents() {
           const query = state.messageSearch
             ? `?q=${encodeURIComponent(state.messageSearch)}`
             : "";
-          fetch(`/api/v1/conversations/${conversation.destination_hash}${query}`)
+          apiFetch(`/api/v1/conversations/${conversation.destination_hash}${query}`)
             .then((response) => response.json())
             .then((messages) => {
               state.conversationMessages = messages;
               renderConversationMessages();
-              return fetch(`/api/v1/conversations/${conversation.destination_hash}/read`, {
+              return apiFetch(`/api/v1/conversations/${conversation.destination_hash}/read`, {
                 method: "POST",
               });
             })
@@ -1280,7 +1310,7 @@ async function loadRrcHistory() {
   const query = state.rrc.activeRoom
     ? `?room=${encodeURIComponent(state.rrc.activeRoom)}`
     : "";
-  const response = await fetch(
+  const response = await apiFetch(
     `/api/v1/rrc/history/${encodeURIComponent(state.rrc.activeHub)}${query}`,
   );
   if (!response.ok) return;
@@ -1301,7 +1331,7 @@ async function loadRrcRooms() {
   state.rrc.roomQueryState.set(hubHash, { state: "loading" });
   renderRrc();
   try {
-    const response = await fetch("/api/v1/rrc/list", {
+    const response = await apiFetch("/api/v1/rrc/list", {
       method: "POST", headers: { "content-type": "application/json" },
       body: JSON.stringify({ destination_hash: hubHash }),
     });
@@ -1329,7 +1359,7 @@ async function loadRrcUsers() {
   state.rrc.userQueryState.set(key, { state: "loading" });
   renderRrc();
   try {
-    const response = await fetch("/api/v1/rrc/who", {
+    const response = await apiFetch("/api/v1/rrc/who", {
       method: "POST", headers: { "content-type": "application/json" },
       body: JSON.stringify({
         destination_hash: hubHash,
@@ -1365,7 +1395,7 @@ $("#rrc-connect-form").addEventListener("submit", async (event) => {
   $("#rrc-connect-error").textContent = "";
   $("#rrc-connect").disabled = true;
   try {
-    const response = await fetch("/api/v1/rrc/connect", {
+    const response = await apiFetch("/api/v1/rrc/connect", {
       method: "POST", headers: { "content-type": "application/json" },
       body: JSON.stringify({ destination_hash: $("#rrc-hub").value, nick: $("#rrc-nick").value || null }),
     });
@@ -1383,7 +1413,7 @@ $("#rrc-connect-form").addEventListener("submit", async (event) => {
 $("#rrc-join").addEventListener("click", async () => {
   const room = $("#rrc-room").value;
   if (!state.rrc.activeHub || !room) return;
-  const response = await fetch("/api/v1/rrc/join", {
+  const response = await apiFetch("/api/v1/rrc/join", {
     method: "POST", headers: { "content-type": "application/json" },
     body: JSON.stringify({
       destination_hash: state.rrc.activeHub,
@@ -1405,7 +1435,7 @@ $("#rrc-list").addEventListener("click", loadRrcRooms);
 $("#rrc-who").addEventListener("click", loadRrcUsers);
 $("#rrc-part").addEventListener("click", async () => {
   if (!state.rrc.activeHub || !state.rrc.activeRoom) return;
-  const response = await fetch("/api/v1/rrc/part", {
+  const response = await apiFetch("/api/v1/rrc/part", {
     method: "POST", headers: { "content-type": "application/json" },
     body: JSON.stringify({
       destination_hash: state.rrc.activeHub,
@@ -1422,7 +1452,7 @@ $("#rrc-part").addEventListener("click", async () => {
 $("#rrc-disconnect").addEventListener("click", async () => {
   if (!state.rrc.activeHub) return;
   const destinationHash = state.rrc.activeHub;
-  const response = await fetch("/api/v1/rrc/disconnect", {
+  const response = await apiFetch("/api/v1/rrc/disconnect", {
     method: "POST", headers: { "content-type": "application/json" },
     body: JSON.stringify({ destination_hash: destinationHash }),
   });
@@ -1470,7 +1500,7 @@ $("#rrc-compose").addEventListener("submit", async (event) => {
     });
     renderRrc();
   }
-  const response = await fetch("/api/v1/rrc/send", {
+  const response = await apiFetch("/api/v1/rrc/send", {
     method: "POST", headers: { "content-type": "application/json" },
     body: JSON.stringify({
       destination_hash: state.rrc.activeHub,
@@ -1500,7 +1530,7 @@ $("#add-bookmark").addEventListener("click", async () => {
     (entry) => entry.kind === "node" && entry.destination_hash === destinationHash,
   );
   const name = node?.display_name || shortHash(destinationHash);
-  const response = await fetch("/api/v1/browser/bookmarks", {
+  const response = await apiFetch("/api/v1/browser/bookmarks", {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ url: page.url, name }),
@@ -1541,7 +1571,7 @@ $("#browser-forward").addEventListener("click", () => {
 const browserCacheDialog = $("#browser-cache-dialog");
 async function loadBrowserCache() {
   $("#browser-cache-error").textContent = "";
-  const response = await fetch("/api/v1/browser/cache");
+  const response = await apiFetch("/api/v1/browser/cache");
   const body = await response.json();
   if (!response.ok) throw new Error(body.error || "Could not inspect browser cache");
   const total = body.reduce((sum, entry) => sum + entry.size_bytes, 0);
@@ -1574,7 +1604,7 @@ $("#browser-cache").addEventListener("click", async () => {
 $("#clear-browser-cache").addEventListener("click", async () => {
   $("#browser-cache-error").textContent = "";
   try {
-    const response = await fetch("/api/v1/browser/cache", { method: "DELETE" });
+    const response = await apiFetch("/api/v1/browser/cache", { method: "DELETE" });
     const body = await response.json();
     if (!response.ok) throw new Error(body.error || "Could not clear browser cache");
     await loadBrowserCache();
@@ -1595,7 +1625,7 @@ $("#message-compose").addEventListener("submit", async (event) => {
   submit.disabled = true;
   $("#message-compose-error").textContent = "";
   try {
-    const response = await fetch("/api/v1/messages", {
+    const response = await apiFetch("/api/v1/messages", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
@@ -1633,7 +1663,7 @@ $("#message-search").addEventListener("input", (event) => {
     if (!state.activeConversation) return;
     state.messageSearch = event.target.value.trim();
     const query = state.messageSearch ? `?q=${encodeURIComponent(state.messageSearch)}` : "";
-    const response = await fetch(`/api/v1/conversations/${state.activeConversation}${query}`);
+    const response = await apiFetch(`/api/v1/conversations/${state.activeConversation}${query}`);
     if (!response.ok) return;
     state.conversationMessages = await response.json();
     renderConversationMessages();
@@ -1645,7 +1675,7 @@ $("#clear-conversation").addEventListener("click", async () => {
   if (!destination || !window.confirm("Delete this conversation's local history? This cannot be undone.")) {
     return;
   }
-  const response = await fetch(`/api/v1/conversations/${destination}`, { method: "DELETE" });
+  const response = await apiFetch(`/api/v1/conversations/${destination}`, { method: "DELETE" });
   const body = await response.json();
   if (!response.ok) {
     $("#message-compose-error").textContent = body.error || "Could not delete conversation";
@@ -1685,7 +1715,7 @@ const identityDialog = $("#identity-dialog");
 $("#identity-settings").addEventListener("click", async () => {
   $("#identity-error").textContent = "";
   $("#identity-result").textContent = "";
-  const response = await fetch("/api/v1/identity");
+  const response = await apiFetch("/api/v1/identity");
   const body = await response.json();
   if (!response.ok) {
     $("#identity-error").textContent = body.error || "Could not load identity settings";
@@ -1707,7 +1737,7 @@ async function updateIdentity(announceNow) {
   $("#identity-error").textContent = "";
   $("#identity-result").textContent = "";
   try {
-    const response = await fetch("/api/v1/identity", {
+    const response = await apiFetch("/api/v1/identity", {
       method: "PUT",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
@@ -1741,7 +1771,7 @@ $("#compose-form").addEventListener("submit", async (event) => {
   submit.textContent = "Queueing…";
   $("#compose-error").textContent = "";
   try {
-    const response = await fetch("/api/v1/messages", {
+    const response = await apiFetch("/api/v1/messages", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify(values),

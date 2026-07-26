@@ -15,7 +15,7 @@ const BROWSER_CACHE_ENTRIES: usize = 256;
 const BROWSER_CACHE_BYTES: i64 = 64 * 1024 * 1024;
 const KNOWN_DESTINATIONS_LIMIT: usize = 2_048;
 const OPERATIONAL_ERRORS_LIMIT: usize = 500;
-const CURRENT_SCHEMA_VERSION: i64 = 6;
+const CURRENT_SCHEMA_VERSION: i64 = 7;
 
 #[derive(Clone)]
 pub struct Database {
@@ -206,6 +206,7 @@ impl Database {
             ",
             [],
         )?;
+        connection.execute("UPDATE rrc_rooms SET room_key = NULL", [])?;
         let version: i64 = connection.query_row(
             "SELECT COALESCE(MAX(version), 0) FROM schema_version",
             [],
@@ -342,7 +343,7 @@ impl Database {
         &self,
         hub_hash: &str,
         room: &str,
-        room_key: Option<&str>,
+        _room_key: Option<&str>,
     ) -> anyhow::Result<()> {
         let connection = self.connection.lock().expect("database mutex poisoned");
         connection.execute(
@@ -353,7 +354,7 @@ impl Database {
                 room_key = excluded.room_key,
                 auto_join = 1
             ",
-            params![hub_hash, room, room_key],
+            params![hub_hash, room, Option::<&str>::None],
         )?;
         Ok(())
     }
@@ -1306,6 +1307,42 @@ mod tests {
     }
 
     #[test]
+    fn migration_removes_previously_persisted_room_keys() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("room-key.db");
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .execute_batch(
+                "
+                CREATE TABLE schema_version(version INTEGER PRIMARY KEY);
+                INSERT INTO schema_version(version) VALUES (6);
+                CREATE TABLE rrc_rooms (
+                    hub_hash TEXT NOT NULL,
+                    room TEXT NOT NULL,
+                    room_key TEXT,
+                    auto_join INTEGER NOT NULL DEFAULT 1,
+                    PRIMARY KEY(hub_hash, room)
+                );
+                INSERT INTO rrc_rooms(hub_hash, room, room_key)
+                VALUES ('hub', 'private', 'plaintext-secret');
+                ",
+            )
+            .unwrap();
+        drop(connection);
+
+        let database = Database::open(&path).unwrap();
+        let connection = database.connection.lock().expect("database mutex poisoned");
+        let key: Option<String> = connection
+            .query_row(
+                "SELECT room_key FROM rrc_rooms WHERE hub_hash = 'hub'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(key, None);
+    }
+
+    #[test]
     fn stores_and_lists_conversations() {
         let database = Database::open(Path::new(":memory:")).unwrap();
         database
@@ -1650,7 +1687,9 @@ mod tests {
         database
             .save_rrc_hub("aa", Some("hub"), Some("nomad"), 10)
             .unwrap();
-        database.save_rrc_room("aa", "rust", None).unwrap();
+        database
+            .save_rrc_room("aa", "rust", Some("session-secret"))
+            .unwrap();
         let saved = database.saved_rrc_hubs().unwrap();
         assert_eq!(
             saved,

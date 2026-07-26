@@ -1,0 +1,30 @@
+[Unit]
+Description=rsNomadNet local Reticulum web client
+After=network.target
+
+[Service]
+Type=simple
+DynamicUser=yes
+StateDirectory=rsnomadnet
+StateDirectoryMode=0700
+ExecStart=/usr/local/bin/rs-nomadnet --state-dir /var/lib/rsnomadnet --rns-config /etc/reticulum
+Restart=on-failure
+RestartSec=5s
+UMask=0077
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+CapabilityBoundingSet=
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target

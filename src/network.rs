@@ -30,7 +30,7 @@ use crate::models::{
     DirectoryEntry, InterfaceSnapshot, MessageView, NetworkSnapshot, NetworkState, ServerEvent,
 };
 
-const MAX_PAGE_BYTES: usize = 4 * 1024 * 1024;
+const MAX_PAGE_BYTES: usize = crate::browser::MAX_PAGE_BYTES;
 const MAX_DOWNLOAD_BYTES: usize = 64 * 1024 * 1024;
 
 pub enum NetworkCommand {
@@ -1176,10 +1176,12 @@ fn now_f64() -> f64 {
 
 fn load_or_create_identity(path: &std::path::Path) -> anyhow::Result<Identity> {
     if path.exists() {
+        crate::config::restrict_file_permissions(path)?;
         return Ok(Identity::from_file(path)?);
     }
     let identity = Identity::new();
     identity.to_file(path)?;
+    crate::config::restrict_file_permissions(path)?;
     Ok(identity)
 }
 

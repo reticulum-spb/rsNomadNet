@@ -35,6 +35,8 @@ The current development slice provides:
 - a persistent directory of peers, remote NomadNet nodes, and propagation
   nodes;
 - remote `/page/` requests over Reticulum Link, including Resource responses;
+- a 1 MiB page limit plus bounded line count and line length before Micron AST
+  construction;
 - a safe Micron-to-AST renderer with nested sections, alignment, inline
   formatting and colours, page links, `lxmf@` message links and anchors,
   styled dividers, preformatted blocks, page colours, table sizing, and cache
@@ -69,7 +71,7 @@ The current development slice provides:
   backwards-compatible fallback for hubs that do not advertise them;
 - dependency-free RRC UI regression tests for delayed room replies, multi-hub
   unread isolation, room selection, and hub removal;
-- automatic SQLite schema reconciliation through version 6, with startup
+- automatic SQLite schema reconciliation through version 7, with startup
   rejection of databases created by newer incompatible versions;
 - bounded retention for per-peer message history, browser cache entries and
   bytes, known announces, RRC history, and operational errors;
@@ -77,6 +79,8 @@ The current development slice provides:
   outbound messages recovered from the persistent queue after restart;
 - repeatable fault-injection and live interoperability harnesses covering
   rsReticulum, rsLXMF, rsRRCD, Python NomadNet RRC, and Python LXMF;
+- optional Bearer authentication, same-origin mutation checks, bounded HTTP
+  request bodies, and restrictive browser security headers;
 - explicit module boundaries for LXMF conversations, remote-page browsing,
   and RRC;
 - a versioned HTTP API and WebSocket event stream.
@@ -122,9 +126,41 @@ cargo run -- --rns-config ~/.rsReticulum
 Application state defaults to `~/.rsNomadNet`. Override it with
 `--state-dir`.
 
-The HTTP listener is intentionally loopback-only by default. Binding it to a
-non-loopback address requires `--allow-remote`; authentication for remote
-access is not implemented yet.
+The HTTP listener is intentionally loopback-only by default.
+
+## Remote access and security
+
+Non-loopback binding requires both explicit permission and a Bearer token:
+
+```text
+umask 077
+openssl rand -hex 32 > ~/.rsNomadNet/web-token
+cargo run --release -- \
+  --listen 0.0.0.0:8080 \
+  --allow-remote \
+  --auth-token-file ~/.rsNomadNet/web-token
+```
+
+Open the page and enter the token when prompted, or use a one-time fragment
+such as `https://nomad.example/#access_token=<token>`. The fragment is removed
+from the address bar and the token remains in that tab's `sessionStorage`.
+API clients must send `Authorization: Bearer <token>`.
+
+Bearer headers are not ambient browser credentials, so cross-site pages cannot
+silently authenticate. State-changing API calls additionally reject
+cross-origin browser requests. CSP, `frame-ancestors`, no-referrer, MIME
+sniffing protection, and a 2 MiB HTTP request-body limit are applied globally.
+
+The built-in server does not terminate TLS. Remote access must be placed behind
+an HTTPS reverse proxy that preserves the original `Host` header. Do not expose
+plain HTTP over an untrusted network: the token and message contents would be
+visible in transit.
+
+The state directory is restricted to mode `0700` on Unix. The Reticulum
+identity and SQLite database are restricted to `0600`. RRC room keys are
+session-only; upgrading to schema v7 clears keys persisted by older builds.
+SQLite still contains message history, drafts, addresses, and settings in
+plaintext, so the state directory and backups must be treated as sensitive.
 
 ## Reliability tests
 
@@ -153,6 +189,57 @@ rsLXMF propagation node. To include a live Python NomadNet page fetch, set
 `PYTHON_NOMADNET_DESTINATION` to its 32-character destination hash; set
 `REQUIRE_PYTHON_NOMADNET=1` to make that optional peer mandatory.
 
+## Production build and installation
+
+Run the complete release gate:
+
+```text
+scripts/verify-release.sh
+```
+
+It runs locked Rust tests, strict Clippy, Web UI tests, and a stripped
+release build. Install the binary and hardened systemd unit with:
+
+```text
+sudo scripts/install.sh
+sudo systemctl enable --now rsnomadnet.service
+```
+
+`PREFIX` and `DESTDIR` are supported for staged installations. The supplied
+unit uses a dynamic user, a private `/var/lib/rsnomadnet` state directory,
+loopback-only HTTP, `/etc/reticulum`, a restrictive umask, and systemd
+sandboxing. Review the unit before enabling it if the Reticulum configuration
+or installation prefix differs.
+
+The stable packaging target for now is the release binary plus the systemd
+unit. Distribution-specific DEB, RPM, container, and desktop packages are
+deferred until deployment feedback establishes which targets are useful.
+
+## Backup and upgrade
+
+Create a consistent online SQLite backup together with the local identity:
+
+```text
+scripts/backup.sh ~/.rsNomadNet ~/backups/rsnomadnet-$(date +%F).tar.gz
+```
+
+The archive is mode `0600` and must be protected like the live identity.
+To restore, stop rsNomadNet, extract the archive into an empty state directory,
+verify ownership and modes (`0700` directory, `0600` files), and start the same
+or a newer binary.
+
+Before an upgrade:
+
+1. Run `scripts/verify-release.sh`.
+2. Create and verify a backup archive.
+3. Stop the service, replace the binary, and start it again.
+4. Check `/api/v1/health`, the Network view, one LXMF conversation, and any
+   configured RRC hubs.
+
+Schema upgrades are automatic and reject newer unknown schemas. Downgrading
+across a schema migration is unsupported; restore the pre-upgrade backup
+instead.
+
 ## Status
 
 This repository is an experimental but usable vertical slice. Runtime
@@ -162,5 +249,5 @@ and remote-page browsing are functional and have interoperability coverage.
 The browser supports the practical Micron Guide surface, forms, partials,
 anchors, cache control, Resource responses, and downloads. Messaging includes
 durable unread state and drafts, searchable history, delivery details, and
-responsive navigation. Browser, messaging, RRC, and reliability blocks are
-complete; the next stage is security and deployment hardening.
+responsive navigation. Browser, messaging, RRC, reliability, security, and
+deployment-hardening blocks are complete.

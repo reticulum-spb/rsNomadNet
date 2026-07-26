@@ -27,6 +27,7 @@ async fn main() -> anyhow::Result<()> {
     let config = config::AppConfig::from_cli(cli)?;
     let database =
         db::Database::open(&config.database_path).context("could not open application database")?;
+    config::restrict_file_permissions(&config.database_path)?;
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()

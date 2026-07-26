@@ -1,8 +1,12 @@
 use std::sync::Arc;
 
+use axum::body::Body;
+use axum::extract::DefaultBodyLimit;
+use axum::extract::Request;
 use axum::extract::ws::{Message, WebSocket};
 use axum::extract::{Path, Query, State, WebSocketUpgrade};
-use axum::http::{StatusCode, header};
+use axum::http::{HeaderValue, Method, StatusCode, header};
+use axum::middleware::{self, Next};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -70,8 +74,132 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/v1/rrc/clear", post(rrc_clear))
         .route("/api/v1/rrc/history/{destination_hash}", get(rrc_history))
         .route("/api/v1/events", get(events))
+        .layer(DefaultBodyLimit::max(2 * 1024 * 1024))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            secure_request,
+        ))
         .layer(TraceLayer::new_for_http())
         .with_state(state)
+}
+
+async fn secure_request(
+    State(state): State<Arc<AppState>>,
+    request: Request<Body>,
+    next: Next,
+) -> Response {
+    let path = request.uri().path();
+    if path.starts_with("/api/") && path != "/api/v1/health" {
+        if let Some(expected) = state.config.auth_token_hash {
+            let supplied = bearer_token(&request).or_else(|| {
+                (path == "/api/v1/events")
+                    .then(|| websocket_token(&request))
+                    .flatten()
+            });
+            if !supplied.is_some_and(|token| token_matches(token, &expected)) {
+                return (
+                    StatusCode::UNAUTHORIZED,
+                    [(header::WWW_AUTHENTICATE, "Bearer realm=\"rsNomadNet\"")],
+                    Json(json!({"error": "authentication required"})),
+                )
+                    .into_response();
+            }
+        }
+        if mutates_state(request.method()) && !same_origin(&request) {
+            return (
+                StatusCode::FORBIDDEN,
+                Json(json!({"error": "cross-origin state change rejected"})),
+            )
+                .into_response();
+        }
+    }
+
+    let mut response = next.run(request).await;
+    let headers = response.headers_mut();
+    headers.insert(
+        header::X_CONTENT_TYPE_OPTIONS,
+        HeaderValue::from_static("nosniff"),
+    );
+    headers.insert(
+        header::REFERRER_POLICY,
+        HeaderValue::from_static("no-referrer"),
+    );
+    headers.insert(
+        header::CONTENT_SECURITY_POLICY,
+        HeaderValue::from_static(
+            "default-src 'self'; connect-src 'self' ws: wss:; img-src 'self' data:; \
+             style-src 'self'; script-src 'self'; base-uri 'none'; frame-ancestors 'none'; \
+             form-action 'self'",
+        ),
+    );
+    response
+}
+
+fn bearer_token(request: &Request<Body>) -> Option<&str> {
+    request
+        .headers()
+        .get(header::AUTHORIZATION)?
+        .to_str()
+        .ok()?
+        .strip_prefix("Bearer ")
+}
+
+fn websocket_token(request: &Request<Body>) -> Option<&str> {
+    request
+        .headers()
+        .get(header::SEC_WEBSOCKET_PROTOCOL)?
+        .to_str()
+        .ok()?
+        .split(',')
+        .map(str::trim)
+        .find_map(|protocol| protocol.strip_prefix("bearer."))
+}
+
+fn token_matches(token: &str, expected: &[u8; 32]) -> bool {
+    let supplied = rns_crypto::sha::full_hash(token.as_bytes());
+    supplied
+        .iter()
+        .zip(expected)
+        .fold(0_u8, |difference, (left, right)| {
+            difference | (left ^ right)
+        })
+        == 0
+}
+
+fn mutates_state(method: &Method) -> bool {
+    !matches!(*method, Method::GET | Method::HEAD | Method::OPTIONS)
+}
+
+fn same_origin(request: &Request<Body>) -> bool {
+    if request
+        .headers()
+        .get("sec-fetch-site")
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value == "cross-site")
+    {
+        return false;
+    }
+    let Some(origin) = request
+        .headers()
+        .get(header::ORIGIN)
+        .and_then(|value| value.to_str().ok())
+    else {
+        return true;
+    };
+    let Some(host) = request
+        .headers()
+        .get(header::HOST)
+        .and_then(|value| value.to_str().ok())
+    else {
+        return false;
+    };
+    let Some(origin_host) = origin
+        .strip_prefix("http://")
+        .or_else(|| origin.strip_prefix("https://"))
+    else {
+        return false;
+    };
+    origin_host.trim_end_matches('/') == host
 }
 
 #[derive(serde::Deserialize)]
@@ -1059,7 +1187,8 @@ async fn fetch_page(
 }
 
 async fn events(ws: WebSocketUpgrade, State(state): State<Arc<AppState>>) -> Response {
-    ws.on_upgrade(move |socket| event_socket(socket, state))
+    ws.protocols(["rsnomadnet"])
+        .on_upgrade(move |socket| event_socket(socket, state))
 }
 
 async fn event_socket(mut socket: WebSocket, state: Arc<AppState>) {
@@ -1124,5 +1253,45 @@ mod tests {
         assert!(parse_hash("0123456789abcdef0123456789abcdef").is_ok());
         assert!(parse_hash("0123").is_err());
         assert!(parse_hash("zz23456789abcdef0123456789abcdef").is_err());
+    }
+
+    #[test]
+    fn bearer_tokens_are_compared_in_constant_time() {
+        let expected = rns_crypto::sha::full_hash(b"0123456789abcdef0123456789abcdef");
+        assert!(token_matches("0123456789abcdef0123456789abcdef", &expected));
+        assert!(!token_matches(
+            "0123456789abcdef0123456789abcdeg",
+            &expected
+        ));
+        let request = Request::builder()
+            .header(
+                header::SEC_WEBSOCKET_PROTOCOL,
+                "rsnomadnet, bearer.0123456789abcdef0123456789abcdef",
+            )
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(
+            websocket_token(&request),
+            Some("0123456789abcdef0123456789abcdef")
+        );
+    }
+
+    #[test]
+    fn rejects_cross_origin_mutations() {
+        let same = Request::builder()
+            .method(Method::POST)
+            .header(header::HOST, "nomad.example")
+            .header(header::ORIGIN, "https://nomad.example")
+            .body(Body::empty())
+            .unwrap();
+        assert!(same_origin(&same));
+
+        let cross = Request::builder()
+            .method(Method::POST)
+            .header(header::HOST, "nomad.example")
+            .header(header::ORIGIN, "https://attacker.example")
+            .body(Body::empty())
+            .unwrap();
+        assert!(!same_origin(&cross));
     }
 }

@@ -1,5 +1,9 @@
 use serde::{Deserialize, Serialize};
 
+pub const MAX_PAGE_BYTES: usize = 1024 * 1024;
+const MAX_PAGE_LINES: usize = 8_192;
+const MAX_LINE_BYTES: usize = 16 * 1024;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NomadUrl {
     pub destination_hash: [u8; 16],
@@ -59,6 +63,8 @@ pub enum BrowserError {
     UnsupportedPath,
     #[error("page is not valid UTF-8")]
     InvalidEncoding,
+    #[error("page exceeds local parser safety limits")]
+    SafetyLimit,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -231,6 +237,9 @@ pub fn parse_page(
     bytes: &[u8],
     from_cache: bool,
 ) -> Result<BrowserPage, BrowserError> {
+    if bytes.len() > MAX_PAGE_BYTES {
+        return Err(BrowserError::SafetyLimit);
+    }
     let source = std::str::from_utf8(bytes).map_err(|_| BrowserError::InvalidEncoding)?;
     let mut cache_seconds = 12 * 60 * 60;
     let mut foreground = None;
@@ -246,7 +255,10 @@ pub fn parse_page(
     let mut style = MicronStyle::default();
     let mut partial_count = 0usize;
 
-    for line in source.lines() {
+    for (line_index, line) in source.lines().enumerate() {
+        if line_index >= MAX_PAGE_LINES || line.len() > MAX_LINE_BYTES {
+            return Err(BrowserError::SafetyLimit);
+        }
         if let Some(value) = line.strip_prefix("#!c=") {
             cache_seconds = value
                 .trim()
@@ -720,6 +732,51 @@ mod tests {
         );
         let file = NomadUrl::parse("11111111111111111111111111111111:/file/a").unwrap();
         assert!(file.is_file());
+    }
+
+    #[test]
+    fn rejects_oversized_pages_and_lines_before_parsing() {
+        assert!(matches!(
+            parse_page("test".into(), &vec![b'a'; MAX_PAGE_BYTES + 1], false),
+            Err(BrowserError::SafetyLimit)
+        ));
+        assert!(matches!(
+            parse_page("test".into(), &vec![b'a'; MAX_LINE_BYTES + 1], false),
+            Err(BrowserError::SafetyLimit)
+        ));
+    }
+
+    #[test]
+    fn parser_boundary_survives_deterministic_fuzz_corpus() {
+        let mut state = 0x6d5a_56da_9b3c_1041_u64;
+        for case in 0..2_000 {
+            let length = case % 2_048;
+            let mut source = String::with_capacity(length);
+            for _ in 0..length {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                let character = match state % 24 {
+                    0 => '`',
+                    1 => '[',
+                    2 => ']',
+                    3 => '<',
+                    4 => '>',
+                    5 => '|',
+                    6 => '\n',
+                    7 => '\\',
+                    value => char::from_u32(32 + value as u32).unwrap(),
+                };
+                source.push(character);
+            }
+            let result = std::panic::catch_unwind(|| {
+                parse_page("fuzz:/page/index.mu".into(), source.as_bytes(), false)
+            });
+            assert!(result.is_ok(), "parser panicked for corpus case {case}");
+            if let Ok(Ok(page)) = result {
+                assert!(page.blocks.len() <= MAX_PAGE_LINES);
+            }
+        }
     }
 
     #[test]
