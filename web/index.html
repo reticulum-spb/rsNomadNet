@@ -53,10 +53,10 @@
           <div class="nav-children" id="rrc-hubs" aria-label="Connected RRC hubs"></div>
         </div>
       </nav>
-      <div class="identity-card">
+      <button type="button" class="identity-card" id="identity-settings">
         <span class="eyebrow">Local identity</span>
         <code id="identity-hash">Not available</code>
-      </div>
+      </button>
     </aside>
 
     <main>
@@ -234,6 +234,23 @@
       <div class="dialog-actions">
         <button type="button" class="secondary" id="cancel-rrc-connect">Cancel</button>
         <button type="submit" class="primary" id="rrc-connect">Connect</button>
+      </div>
+    </form>
+  </dialog>
+  <dialog id="identity-dialog">
+    <form id="identity-form">
+      <div class="dialog-heading">
+        <div><span class="eyebrow">LXMF delivery</span><h2>Local identity</h2></div>
+        <button type="button" class="icon-button" id="close-identity" aria-label="Close">×</button>
+      </div>
+      <label>Destination hash<input id="identity-destination" readonly></label>
+      <label>Announce name<input id="identity-name" maxlength="128" autocomplete="nickname" placeholder="Optional display name"></label>
+      <p class="form-error" id="identity-error" role="alert"></p>
+      <p class="form-success" id="identity-result" role="status"></p>
+      <div class="dialog-actions">
+        <button type="button" class="secondary" id="cancel-identity">Cancel</button>
+        <button type="button" class="secondary" id="save-identity">Save</button>
+        <button type="button" class="primary" id="announce-identity">Announce Now</button>
       </div>
     </form>
   </dialog>

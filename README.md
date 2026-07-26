@@ -10,6 +10,8 @@ The current development slice provides:
 - a Reticulum runtime adapter and read-only interface statistics;
 - an announced `lxmf.delivery` destination accepting packet and Resource
   deliveries;
+- a persistent editable LXMF announce name and manual `Announce Now` control
+  in the local-identity dialog;
 - signature verification against identities recalled by rsReticulum;
 - persistent outbound LXMF queue with automatic, opportunistic, Direct, and
   propagated delivery;

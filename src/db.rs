@@ -146,6 +146,11 @@ impl Database {
                 updated_at INTEGER NOT NULL,
                 PRIMARY KEY(scope, target)
             );
+
+            CREATE TABLE IF NOT EXISTS settings (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            );
             ",
         )?;
         ensure_column(&connection, "rrc_hubs", "nick", "TEXT")?;
@@ -622,6 +627,31 @@ impl Database {
         Ok(())
     }
 
+    pub fn setting(&self, key: &str) -> anyhow::Result<Option<String>> {
+        let connection = self.connection.lock().expect("database mutex poisoned");
+        let result =
+            connection.query_row("SELECT value FROM settings WHERE key = ?1", [key], |row| {
+                row.get(0)
+            });
+        match result {
+            Ok(value) => Ok(Some(value)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    pub fn set_setting(&self, key: &str, value: &str) -> anyhow::Result<()> {
+        let connection = self.connection.lock().expect("database mutex poisoned");
+        connection.execute(
+            "
+            INSERT INTO settings(key, value) VALUES (?1, ?2)
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value
+            ",
+            params![key, value],
+        )?;
+        Ok(())
+    }
+
     pub fn search_messages(
         &self,
         destination_hash: &str,
@@ -999,6 +1029,11 @@ mod tests {
         );
         database.save_draft("lxmf", "aa", "", 13).unwrap();
         assert_eq!(database.draft("lxmf", "aa").unwrap(), None);
+        database.set_setting("announce_name", "Nomad").unwrap();
+        assert_eq!(
+            database.setting("announce_name").unwrap().as_deref(),
+            Some("Nomad")
+        );
 
         let found = database.search_messages("aa", "hello").unwrap();
         assert_eq!(found.len(), 1);

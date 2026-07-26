@@ -61,7 +61,8 @@ nav { display: grid; gap: 6px; }
 .rrc-hub-item:hover, .message-peer-item:hover { color: var(--text); background: var(--panel); }
 .rrc-hub-item.active, .message-peer-item.active { color: var(--accent); background: var(--accent-dim); }
 .rrc-hub-item.unread { color: var(--text); font-weight: 700; }
-.identity-card { display: grid; gap: 7px; padding: 14px; border: 1px solid var(--border); border-radius: 10px; background: var(--panel); overflow: hidden; }
+.identity-card { display: grid; gap: 7px; width: 100%; padding: 14px; color: var(--text); border: 1px solid var(--border); border-radius: 10px; background: var(--panel); overflow: hidden; text-align: left; cursor: pointer; }
+.identity-card:hover { border-color: var(--accent); background: var(--panel-2); }
 .identity-card code { color: var(--muted); overflow: hidden; text-overflow: ellipsis; font-size: 11px; }
 
 main { min-width: 0; padding: 42px; overflow: hidden; }
@@ -235,6 +236,7 @@ dialog input, dialog textarea, dialog select { width: 100%; padding: 11px 12px; 
 dialog input:focus, dialog textarea:focus, dialog select:focus { border-color: var(--accent); box-shadow: 0 0 0 3px #d3ff5810; }
 .optional { color: #59635e; font-weight: 400; }
 .form-error { min-height: 18px; margin: 0; color: var(--danger); font-size: 12px; }
+.form-success { min-height: 18px; margin: 0; color: var(--accent); font-size: 12px; }
 .dialog-actions { display: flex; justify-content: flex-end; gap: 10px; }
 .secondary { padding: 10px 16px; color: var(--text); border: 1px solid var(--border); border-radius: 8px; background: transparent; cursor: pointer; }
 
@@ -248,7 +250,7 @@ dialog input:focus, dialog textarea:focus, dialog select:focus { border-color: v
   .nav-item { justify-content: flex-start; padding: 10px 12px; font-size: 12px; }
   .nav-item { flex-direction: row; gap: 10px; }
   .nav-children { display: block; }
-  .identity-card { display: none; }
+  .identity-card { display: grid; margin-top: 18px; }
   main { padding: 20px 12px; }
   .messages-panel { height: calc(100vh - 104px); min-height: 420px; }
   .network-panel { height: calc(100vh - 104px); min-height: 420px; padding: 18px 12px; }

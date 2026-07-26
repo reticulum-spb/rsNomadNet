@@ -1548,6 +1548,58 @@ $("#new-message").addEventListener("click", () => {
 });
 $("#close-compose").addEventListener("click", () => composeDialog.close());
 $("#cancel-compose").addEventListener("click", () => composeDialog.close());
+
+const identityDialog = $("#identity-dialog");
+$("#identity-settings").addEventListener("click", async () => {
+  $("#identity-error").textContent = "";
+  $("#identity-result").textContent = "";
+  const response = await fetch("/api/v1/identity");
+  const body = await response.json();
+  if (!response.ok) {
+    $("#identity-error").textContent = body.error || "Could not load identity settings";
+  } else {
+    $("#identity-destination").value = body.destination_hash || "Not available";
+    $("#identity-name").value = body.name || "";
+    $("#announce-identity").disabled = !body.online;
+  }
+  identityDialog.showModal();
+});
+$("#close-identity").addEventListener("click", () => identityDialog.close());
+$("#cancel-identity").addEventListener("click", () => identityDialog.close());
+
+async function updateIdentity(announceNow) {
+  const save = $("#save-identity");
+  const announce = $("#announce-identity");
+  save.disabled = true;
+  announce.disabled = true;
+  $("#identity-error").textContent = "";
+  $("#identity-result").textContent = "";
+  try {
+    const response = await fetch("/api/v1/identity", {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        name: $("#identity-name").value,
+        announce_now: announceNow,
+      }),
+    });
+    const body = await response.json();
+    if (!response.ok) throw new Error(body.error || "Could not update identity");
+    $("#identity-name").value = body.name;
+    $("#identity-result").textContent = body.announced
+      ? "Announce sent"
+      : "Announce name saved";
+  } catch (error) {
+    $("#identity-error").textContent = error.message;
+  } finally {
+    save.disabled = false;
+    announce.disabled = state.network?.state !== "online";
+  }
+}
+
+$("#save-identity").addEventListener("click", () => updateIdentity(false));
+$("#announce-identity").addEventListener("click", () => updateIdentity(true));
+
 $("#compose-form").addEventListener("submit", async (event) => {
   event.preventDefault();
   const form = event.currentTarget;

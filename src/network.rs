@@ -34,6 +34,11 @@ const MAX_PAGE_BYTES: usize = 4 * 1024 * 1024;
 const MAX_DOWNLOAD_BYTES: usize = 64 * 1024 * 1024;
 
 pub enum NetworkCommand {
+    SetAnnounceName {
+        name: Option<String>,
+        announce_now: bool,
+        response: oneshot::Sender<Result<(), String>>,
+    },
     SendMessage {
         destination_hash: [u8; 16],
         title: String,
@@ -84,7 +89,15 @@ async fn run(state: Arc<AppState>) -> anyhow::Result<()> {
         .await;
 
     let identity = load_or_create_identity(&state.config.identity_path)?;
-    let mut delivery = DeliveryIdentity::new(identity, Some("rsNomadNet".into()), None)?;
+    let announce_name = state
+        .database
+        .setting("announce_name")?
+        .unwrap_or_else(|| "rsNomadNet".into());
+    let mut delivery = DeliveryIdentity::new(
+        identity,
+        (!announce_name.is_empty()).then_some(announce_name),
+        None,
+    )?;
     let destination_hash = hex::encode(delivery.destination_hash());
     let config = state
         .config
@@ -185,6 +198,21 @@ async fn run(state: Arc<AppState>) -> anyhow::Result<()> {
             command = command_rx.recv() => {
                 let Some(command) = command else { break };
                 match command {
+                    NetworkCommand::SetAnnounceName {
+                        name,
+                        announce_now,
+                        response,
+                    } => {
+                        delivery.set_display_name(name);
+                        let result = if announce_now {
+                            announce(&runtime, &mut delivery)
+                                .await
+                                .map_err(|error| error.to_string())
+                        } else {
+                            Ok(())
+                        };
+                        let _ = response.send(result);
+                    }
                     NetworkCommand::SendMessage {
                         destination_hash,
                         title,

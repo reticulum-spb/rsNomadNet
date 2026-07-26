@@ -25,6 +25,10 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/style.css", get(style_css))
         .route("/api/v1/health", get(health))
         .route("/api/v1/state", get(snapshot))
+        .route(
+            "/api/v1/identity",
+            get(identity_settings).put(update_identity),
+        )
         .route("/api/v1/conversations", get(conversations))
         .route("/api/v1/directory", get(directory))
         .route(
@@ -573,6 +577,79 @@ async fn snapshot(State(state): State<Arc<AppState>>) -> Json<serde_json::Value>
             "interface_statistics": "available"
         }
     }))
+}
+
+async fn identity_settings(State(state): State<Arc<AppState>>) -> Response {
+    let network = state.network.read().await;
+    let name = match state.database.setting("announce_name") {
+        Ok(Some(name)) => name,
+        Ok(None) => "rsNomadNet".into(),
+        Err(error) => return internal_error(error),
+    };
+    Json(json!({
+        "destination_hash": network.destination_hash,
+        "name": name,
+        "online": matches!(network.state, crate::models::NetworkState::Online),
+    }))
+    .into_response()
+}
+
+#[derive(serde::Deserialize)]
+struct IdentitySettingsRequest {
+    name: String,
+    #[serde(default)]
+    announce_now: bool,
+}
+
+async fn update_identity(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<IdentitySettingsRequest>,
+) -> Response {
+    let name = request
+        .name
+        .chars()
+        .filter(|character| !character.is_control())
+        .take(128)
+        .collect::<String>()
+        .trim()
+        .to_string();
+    if let Err(error) = state.database.set_setting("announce_name", &name) {
+        return internal_error(error);
+    }
+    let online = matches!(
+        state.network.read().await.state,
+        crate::models::NetworkState::Online
+    );
+    if !online {
+        if request.announce_now {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({"error": "Reticulum is not online", "name": name})),
+            )
+                .into_response();
+        }
+        return Json(json!({"name": name, "announced": false})).into_response();
+    }
+    let (response_tx, response_rx) = oneshot::channel();
+    if state
+        .network_commands
+        .send(crate::network::NetworkCommand::SetAnnounceName {
+            name: (!name.is_empty()).then_some(name.clone()),
+            announce_now: request.announce_now,
+            response: response_tx,
+        })
+        .await
+        .is_err()
+    {
+        return unavailable("network service is unavailable");
+    }
+    match response_rx.await {
+        Ok(Ok(())) => {
+            Json(json!({"name": name, "announced": request.announce_now})).into_response()
+        }
+        Ok(Err(error)) => (StatusCode::BAD_GATEWAY, Json(json!({"error": error}))).into_response(),
+        Err(_) => unavailable("network service stopped"),
+    }
 }
 
 async fn conversations(State(state): State<Arc<AppState>>) -> Response {
