@@ -1,7 +1,7 @@
 # rsNomadNet
 
-An experimental local web client for NomadNet, built on the sibling
-`rsReticulum` and `rsLXMF` projects.
+An experimental local web client compatible with NomadNet, built on the
+sibling `rsReticulum`, `rsLXMF`, `rsRRC`, and `rsRRC-client` projects.
 
 The current development slice provides:
 
@@ -22,7 +22,8 @@ The current development slice provides:
   store-and-forward downloads;
 - inbound deduplication across opportunistic, Direct, Resource, and propagated
   delivery paths;
-- persistent conversations and a web message composer;
+- persistent conversations, a compact navigation tree, quick replies, and a
+  full web message composer for new peers;
 - live and cached announce discovery for `lxmf.delivery`,
   `nomadnetwork.node`, and `lxmf.propagation`;
 - a persistent directory of peers, remote NomadNet nodes, and propagation
@@ -44,13 +45,29 @@ The current development slice provides:
   reconnect backoff, and room restoration;
 - persistent RRC hub profiles and message history; room keys intentionally
   remain session-only, matching NomadNet;
-- RRC connect, disconnect, room lifecycle, history API and web interface;
+- RRC connect, disconnect, room lifecycle, history API and a compact web chat
+  interface with hubs in the navigation tree;
 - typed RRC public-room and room-member discovery via LIST/WHO;
 - live structured RRC room topics, registration state, and modes with
   backwards-compatible fallback for hubs that do not advertise them;
 - explicit module boundaries for LXMF conversations, remote-page browsing,
   and RRC;
 - a versioned HTTP API and WebSocket event stream.
+
+The browser interface deliberately omits QR codes, BLE management, page
+hosting, and printing. Reticulum interfaces are exposed only as read-only
+statistics. The intended scope is LXMF text messaging, remote NomadNet page
+browsing, and RRC.
+
+## Sibling projects
+
+| Project | Role |
+| --- | --- |
+| `rsReticulum` | Reticulum runtime, identities, paths, Links, packets, Resources, and interface statistics. |
+| `rsLXMF` | LXMF message format, delivery identities, propagation deposits, and store-and-forward retrieval. |
+| `rsRRC` | Shared RRC v1 CBOR protocol and optional structured extensions. |
+| `rsRRC-client` | Reusable multi-hub RRC client, reconnect logic, discovery, and administration helpers. |
+| `rsRRCD` | Compatible Rust RRC hub used for interoperability and live testing. |
 
 ## Run
 
@@ -76,8 +93,10 @@ access is not implemented yet.
 
 ## Status
 
-This repository is at an early vertical-slice stage. The web shell, database,
-runtime lifecycle, interface statistics, directory discovery, the complete
-LXMF delivery policy, basic remote-page browsing, and event transport are
-functional. The remaining Micron style and partial-request surface is the next
-implementation stage.
+This repository is an experimental but usable vertical slice. Runtime
+lifecycle, interface statistics, directory discovery, persistent LXMF
+messaging, automatic/direct/opportunistic/propagated delivery, multi-hub RRC,
+and basic remote-page browsing are functional and have live interoperability
+coverage. The next implementation stage is broader Micron rendering and
+request compatibility, followed by browser hardening and release-oriented
+packaging.
