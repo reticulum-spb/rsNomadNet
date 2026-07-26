@@ -7,7 +7,7 @@ const state = {
   browser: { history: [], position: -1, page: null },
   rrc: {
     hubs: new Map(), activeHub: null, activeRoom: null, messages: [],
-    availableRooms: new Map(), roomListsLoaded: new Set(), users: [],
+    availableRooms: new Map(), roomListsLoaded: new Set(), usersByRoom: new Map(),
     unreadRooms: new Map(),
   },
 };
@@ -609,7 +609,9 @@ function connectEvents() {
       if (JSON.stringify(previous) !== JSON.stringify(message.payload)) renderRrc();
       if (message.payload.destination_hash === state.rrc.activeHub
           && message.payload.connected
-          && state.rrc.activeRoom) {
+          && state.rrc.activeRoom
+          && message.payload.rooms.includes(state.rrc.activeRoom)
+          && !previous?.rooms?.includes(state.rrc.activeRoom)) {
         loadRrcUsers();
       }
     } else if (message.type === "rrc_message") {
@@ -618,7 +620,10 @@ function connectEvents() {
           && message.payload.room === state.rrc.activeRoom
           && message.payload.source_hash
           && message.payload.nick) {
-        const user = state.rrc.users.find(
+        const users = state.rrc.usersByRoom.get(
+          rrcRoomKey(message.payload.hub_hash, message.payload.room),
+        ) || [];
+        const user = users.find(
           (candidate) => candidate.identity === message.payload.source_hash,
         );
         if (user) user.nick = message.payload.nick;
@@ -724,7 +729,6 @@ function renderRrc() {
       markRrcRoomRead(state.rrc.activeHub, room);
       renderRrc();
       loadRrcHistory();
-      loadRrcUsers();
     });
     return button;
   });
@@ -839,7 +843,9 @@ function renderRrc() {
     return line;
   }));
   messageList.scrollTop = messageList.scrollHeight;
-  const users = state.rrc.users;
+  const users = state.rrc.usersByRoom.get(
+    rrcRoomKey(state.rrc.activeHub, state.rrc.activeRoom),
+  ) || [];
   $("#rrc-users").replaceChildren(...(users.length ? users.map((user) => {
     const item = document.createElement("div");
     item.className = "rrc-user";
@@ -909,7 +915,6 @@ async function loadRrcRooms() {
 
 async function loadRrcUsers() {
   if (!state.rrc.activeHub || !state.rrc.activeRoom) {
-    state.rrc.users = [];
     renderRrc();
     return;
   }
@@ -927,8 +932,8 @@ async function loadRrcUsers() {
     $("#rrc-error").textContent = body.error;
     return;
   }
+  state.rrc.usersByRoom.set(rrcRoomKey(hubHash, room), body);
   if (hubHash !== state.rrc.activeHub || room !== state.rrc.activeRoom) return;
-  state.rrc.users = body;
   renderRrc();
 }
 
@@ -963,7 +968,6 @@ $("#rrc-join").addEventListener("click", async () => {
     $("#rrc-key").value = "";
     markRrcRoomRead(state.rrc.activeHub, state.rrc.activeRoom);
     loadRrcHistory();
-    loadRrcUsers();
   }
 });
 $("#rrc-list").addEventListener("click", loadRrcRooms);
