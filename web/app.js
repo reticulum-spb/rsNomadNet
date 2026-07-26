@@ -9,6 +9,7 @@ const state = {
   browser: {
     history: [], position: -1, page: null, partialTimers: [], generation: 0,
     navigationController: null, partialControllers: new Set(), failedAddress: null,
+    bookmarks: [],
   },
   rrc: {
     hubs: new Map(), activeHub: null, activeRoom: null, messages: [],
@@ -397,6 +398,47 @@ function resolveBrowserTarget(target) {
   const current = state.browser.page?.url;
   if (!current) return target;
   return `${current.slice(0, 32)}${target}`;
+}
+
+function renderBrowserBookmarks() {
+  $("#browser-bookmarks").replaceChildren(...state.browser.bookmarks.map((bookmark) => {
+    const row = document.createElement("div");
+    row.className = "bookmark-row";
+    const open = document.createElement("button");
+    open.className = "bookmark-item";
+    open.textContent = bookmark.name;
+    open.title = bookmark.url;
+    open.addEventListener("click", () => {
+      switchView("browser");
+      navigateBrowser(bookmark.url);
+    });
+    const remove = document.createElement("button");
+    remove.className = "bookmark-remove";
+    remove.textContent = "−";
+    remove.title = `Remove ${bookmark.name}`;
+    remove.setAttribute("aria-label", `Remove bookmark ${bookmark.name}`);
+    remove.addEventListener("click", async () => {
+      const response = await fetch("/api/v1/browser/bookmarks", {
+        method: "DELETE",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ url: bookmark.url }),
+      });
+      if (!response.ok) return;
+      state.browser.bookmarks = state.browser.bookmarks.filter(
+        (item) => item.url !== bookmark.url,
+      );
+      renderBrowserBookmarks();
+    });
+    row.append(open, remove);
+    return row;
+  }));
+}
+
+async function loadBrowserBookmarks() {
+  const response = await fetch("/api/v1/browser/bookmarks");
+  if (!response.ok) throw new Error("Could not load browser bookmarks");
+  state.browser.bookmarks = await response.json();
+  renderBrowserBookmarks();
 }
 
 async function openLxmfLink(target) {
@@ -1385,6 +1427,34 @@ $("#rrc-compose").addEventListener("submit", async (event) => {
 });
 
 $("#browser-go").addEventListener("click", () => navigateBrowser($("#browser-address").value));
+$("#add-bookmark").addEventListener("click", async () => {
+  const page = state.browser.page;
+  if (!page?.url) {
+    $("#browser-status").textContent = "Open a NomadNet page before adding a bookmark";
+    return;
+  }
+  const destinationHash = page.url.slice(0, 32);
+  const node = state.directory.find(
+    (entry) => entry.kind === "node" && entry.destination_hash === destinationHash,
+  );
+  const name = node?.display_name || shortHash(destinationHash);
+  const response = await fetch("/api/v1/browser/bookmarks", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ url: page.url, name }),
+  });
+  const body = await response.json();
+  if (!response.ok) {
+    $("#browser-status").textContent = body.error || "Could not add bookmark";
+    return;
+  }
+  state.browser.bookmarks = [
+    body,
+    ...state.browser.bookmarks.filter((bookmark) => bookmark.url !== body.url),
+  ].sort((left, right) => left.name.localeCompare(right.name));
+  renderBrowserBookmarks();
+  $("#browser-status").textContent = `Bookmarked as ${body.name}`;
+});
 $("#browser-address").addEventListener("keydown", (event) => {
   if (event.key === "Enter") navigateBrowser(event.currentTarget.value);
 });
@@ -1629,7 +1699,7 @@ $("#compose-form").addEventListener("submit", async (event) => {
   }
 });
 
-Promise.all([loadState(), loadConversations(), loadDirectory()]).catch((error) => {
+Promise.all([loadState(), loadConversations(), loadDirectory(), loadBrowserBookmarks()]).catch((error) => {
   $("#network-label").textContent = error.message;
   $("#network-pill").dataset.state = "failed";
 });

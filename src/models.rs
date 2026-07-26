@@ -83,6 +83,13 @@ pub struct DirectoryEntry {
     pub active: bool,
 }
 
+#[derive(Debug, Clone, Serialize, Eq, PartialEq)]
+pub struct BrowserBookmark {
+    pub url: String,
+    pub name: String,
+    pub created_at: i64,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct RrcHubView {
     pub destination_hash: String,

@@ -57,10 +57,14 @@ nav { display: grid; gap: 6px; }
 .nav-add:hover { color: var(--accent); border-color: var(--border); background: var(--panel); }
 .nav-children:empty { display: none; }
 .rrc-hub-item, .message-peer-item { width: calc(100% - 20px); margin-left: 20px; padding: 8px 10px; color: var(--muted); border: 0; border-radius: 7px; background: transparent; text-align: left; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; }
-.rrc-hub-item::before, .message-peer-item::before { content: "└"; margin-right: 8px; color: #59635e; }
-.rrc-hub-item:hover, .message-peer-item:hover { color: var(--text); background: var(--panel); }
+.rrc-hub-item::before, .message-peer-item::before, .bookmark-item::before { content: "└"; margin-right: 8px; color: #59635e; }
+.rrc-hub-item:hover, .message-peer-item:hover, .bookmark-item:hover { color: var(--text); background: var(--panel); }
 .rrc-hub-item.active, .message-peer-item.active { color: var(--accent); background: var(--accent-dim); }
 .rrc-hub-item.unread { color: var(--text); font-weight: 700; }
+.bookmark-row { display: flex; align-items: center; width: calc(100% - 20px); margin-left: 20px; gap: 2px; }
+.bookmark-item { flex: 1; min-width: 0; padding: 8px 6px; color: var(--muted); border: 0; border-radius: 7px; background: transparent; text-align: left; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; }
+.bookmark-remove { flex: 0 0 24px; width: 24px; height: 24px; padding: 0; color: #59635e; border: 0; border-radius: 5px; background: transparent; cursor: pointer; }
+.bookmark-remove:hover { color: var(--danger); background: var(--panel); }
 .identity-card { display: grid; gap: 7px; width: 100%; padding: 14px; color: var(--text); border: 1px solid var(--border); border-radius: 10px; background: var(--panel); overflow: hidden; text-align: left; cursor: pointer; }
 .identity-card:hover { border-color: var(--accent); background: var(--panel-2); }
 .identity-card code { color: var(--muted); overflow: hidden; text-overflow: ellipsis; font-size: 11px; }

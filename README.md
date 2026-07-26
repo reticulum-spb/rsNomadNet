@@ -40,7 +40,8 @@ The current development slice provides:
   styled dividers, preformatted blocks, page colours, table sizing, and cache
   headers;
 - inspectable/clearable page cache, browser history, cancellable navigation,
-  retryable error views, and reload;
+  retryable error views, reload, and persistent node-named page bookmarks in
+  the navigation tree;
 - remote `/file/` downloads with single- and multi-segment Resource support,
   Python NomadNet filename metadata, safe filenames, common MIME types, and a
   pre-allocation 64 MiB client-side limit;

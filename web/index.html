@@ -40,9 +40,15 @@
         <button class="nav-item" data-view="interfaces">
           <span class="nav-icon">≋</span><span>Interfaces</span>
         </button>
-        <button class="nav-item" data-view="browser">
-          <span class="nav-icon">◎</span><span>Browser</span>
-        </button>
+        <div class="nav-branch">
+          <div class="nav-branch-heading">
+            <button class="nav-item" data-view="browser">
+              <span class="nav-icon">◎</span><span>Browser</span>
+            </button>
+            <button class="nav-add" id="add-bookmark" aria-label="Bookmark current page" title="Bookmark current page">+</button>
+          </div>
+          <div class="nav-children" id="browser-bookmarks" aria-label="Browser bookmarks"></div>
+        </div>
         <div class="nav-branch">
           <div class="nav-branch-heading">
             <button class="nav-item" data-view="rrc">

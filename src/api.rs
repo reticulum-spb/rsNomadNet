@@ -50,6 +50,12 @@ pub fn router(state: Arc<AppState>) -> Router {
             "/api/v1/browser/cache",
             get(browser_cache).delete(clear_browser_cache),
         )
+        .route(
+            "/api/v1/browser/bookmarks",
+            get(browser_bookmarks)
+                .post(save_browser_bookmark)
+                .delete(remove_browser_bookmark),
+        )
         .route("/api/v1/rrc/connect", post(rrc_connect))
         .route("/api/v1/rrc/disconnect", post(rrc_disconnect))
         .route("/api/v1/rrc/nick", post(rrc_nick))
@@ -540,6 +546,81 @@ async fn browser_cache(State(state): State<Arc<AppState>>) -> Response {
 async fn clear_browser_cache(State(state): State<Arc<AppState>>) -> Response {
     match state.database.clear_browser_cache() {
         Ok(deleted) => Json(json!({"deleted": deleted})).into_response(),
+        Err(error) => internal_error(error),
+    }
+}
+
+async fn browser_bookmarks(State(state): State<Arc<AppState>>) -> Response {
+    match state.database.browser_bookmarks() {
+        Ok(bookmarks) => Json(bookmarks).into_response(),
+        Err(error) => internal_error(error),
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct BrowserBookmarkRequest {
+    url: String,
+    name: Option<String>,
+}
+
+fn bookmark_name(value: Option<&str>, destination_hash: &[u8; 16]) -> String {
+    let name = value
+        .unwrap_or("")
+        .chars()
+        .filter(|character| !character.is_control())
+        .take(128)
+        .collect::<String>()
+        .trim()
+        .to_string();
+    if name.is_empty() {
+        hex::encode(destination_hash)
+    } else {
+        name
+    }
+}
+
+async fn save_browser_bookmark(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<BrowserBookmarkRequest>,
+) -> Response {
+    let url = match NomadUrl::parse(&request.url) {
+        Ok(url) if url.is_page() => url,
+        _ => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": "bookmark requires a valid NomadNet page URL"})),
+            )
+                .into_response();
+        }
+    };
+    let canonical = url.canonical();
+    let name = bookmark_name(request.name.as_deref(), &url.destination_hash);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64;
+    match state.database.save_browser_bookmark(&canonical, &name, now) {
+        Ok(()) => Json(json!({"url": canonical, "name": name, "created_at": now})).into_response(),
+        Err(error) => internal_error(error),
+    }
+}
+
+async fn remove_browser_bookmark(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<BrowserBookmarkRequest>,
+) -> Response {
+    let url = match NomadUrl::parse(&request.url) {
+        Ok(url) if url.is_page() => url.canonical(),
+        _ => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": "invalid bookmark URL"})),
+            )
+                .into_response();
+        }
+    };
+    match state.database.remove_browser_bookmark(&url) {
+        Ok(removed) => Json(json!({"removed": removed})).into_response(),
         Err(error) => internal_error(error),
     }
 }

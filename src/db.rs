@@ -5,7 +5,9 @@ use anyhow::Context;
 use rusqlite::{Connection, params};
 
 use crate::browser::BrowserCacheEntry;
-use crate::models::{ConversationSummary, DirectoryEntry, MessageView, RrcMessageView};
+use crate::models::{
+    BrowserBookmark, ConversationSummary, DirectoryEntry, MessageView, RrcMessageView,
+};
 
 const RRC_HISTORY_PER_ROOM: usize = 500;
 
@@ -150,6 +152,12 @@ impl Database {
             CREATE TABLE IF NOT EXISTS settings (
                 key TEXT PRIMARY KEY,
                 value TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS browser_bookmarks (
+                url TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                created_at INTEGER NOT NULL
             );
             ",
         )?;
@@ -516,6 +524,44 @@ impl Database {
         connection
             .execute("DELETE FROM browser_cache", [])
             .map_err(Into::into)
+    }
+
+    pub fn browser_bookmarks(&self) -> anyhow::Result<Vec<BrowserBookmark>> {
+        let connection = self.connection.lock().expect("database mutex poisoned");
+        let mut statement = connection.prepare(
+            "SELECT url, name, created_at FROM browser_bookmarks ORDER BY name, created_at",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok(BrowserBookmark {
+                url: row.get(0)?,
+                name: row.get(1)?,
+                created_at: row.get(2)?,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    pub fn save_browser_bookmark(
+        &self,
+        url: &str,
+        name: &str,
+        created_at: i64,
+    ) -> anyhow::Result<()> {
+        let connection = self.connection.lock().expect("database mutex poisoned");
+        connection.execute(
+            "
+            INSERT INTO browser_bookmarks(url, name, created_at)
+            VALUES (?1, ?2, ?3)
+            ON CONFLICT(url) DO UPDATE SET name = excluded.name
+            ",
+            params![url, name, created_at],
+        )?;
+        Ok(())
+    }
+
+    pub fn remove_browser_bookmark(&self, url: &str) -> anyhow::Result<bool> {
+        let connection = self.connection.lock().expect("database mutex poisoned");
+        Ok(connection.execute("DELETE FROM browser_bookmarks WHERE url = ?1", [url])? > 0)
     }
 
     pub fn conversations(&self) -> anyhow::Result<Vec<ConversationSummary>> {
@@ -1160,6 +1206,24 @@ mod tests {
         assert!(entries[0].expired);
         assert_eq!(database.clear_browser_cache().unwrap(), 1);
         assert!(database.browser_cache_entries(160).unwrap().is_empty());
+
+        database
+            .save_browser_bookmark("aa:/page/index.mu", "Test node", 100)
+            .unwrap();
+        assert_eq!(
+            database.browser_bookmarks().unwrap(),
+            vec![BrowserBookmark {
+                url: "aa:/page/index.mu".into(),
+                name: "Test node".into(),
+                created_at: 100,
+            }]
+        );
+        assert!(
+            database
+                .remove_browser_bookmark("aa:/page/index.mu")
+                .unwrap()
+        );
+        assert!(database.browser_bookmarks().unwrap().is_empty());
     }
 
     #[test]
