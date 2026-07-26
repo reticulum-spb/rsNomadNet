@@ -88,6 +88,14 @@ cargo run -- --offline
 
 Then open `http://127.0.0.1:8080`.
 
+For Web UI development, `build.rs` tracks the embedded files in `web/`.
+Use `cargo-watch` to rebuild and restart the server automatically whenever
+Rust or Web sources change:
+
+```text
+cargo watch -w src -w web -w Cargo.toml -w build.rs -x 'run -- --offline'
+```
+
 To start the adjacent rsReticulum runtime, omit `--offline` and optionally
 provide its configuration directory:
 
