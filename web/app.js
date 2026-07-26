@@ -233,28 +233,19 @@ async function handleLocalRrcCommand(text) {
 function renderConversations() {
   const container = $("#conversation-list");
   if (!state.conversations.length) {
-    const empty = document.createElement("div");
-    empty.className = "empty compact";
-    empty.innerHTML = '<span class="empty-icon">◇</span><strong>No conversations yet</strong><span>Incoming LXMF messages will appear here.</span>';
-    container.replaceChildren(empty);
+    container.replaceChildren();
     return;
   }
   container.replaceChildren(...state.conversations.map((conversation) => {
     const button = document.createElement("button");
-    button.className = "conversation-item";
+    button.className = "message-peer-item";
     button.classList.toggle("active", state.activeConversation === conversation.destination_hash);
-    const avatar = document.createElement("span");
-    avatar.className = "peer-avatar";
-    avatar.textContent = (conversation.display_name || conversation.destination_hash)[0].toUpperCase();
-    const copy = document.createElement("span");
-    copy.className = "conversation-copy";
-    const name = document.createElement("strong");
-    name.textContent = conversation.display_name || shortHash(conversation.destination_hash);
-    const preview = document.createElement("span");
-    preview.textContent = conversation.last_message || "No text";
-    copy.append(name, preview);
-    button.append(avatar, copy);
-    button.addEventListener("click", () => openConversation(conversation));
+    button.textContent = conversation.display_name || shortHash(conversation.destination_hash);
+    button.title = `${conversation.destination_hash} · ${conversation.last_message || "No messages"}`;
+    button.addEventListener("click", () => {
+      switchView("messages");
+      openConversation(conversation);
+    });
     return button;
   }));
 }
@@ -553,6 +544,7 @@ async function loadDirectory() {
 async function openConversation(conversation) {
   state.activeConversation = conversation.destination_hash;
   renderConversations();
+  $("#message-compose-error").textContent = "";
   const response = await fetch(`/api/v1/conversations/${conversation.destination_hash}`);
   if (!response.ok) throw new Error("Could not load messages");
   const messages = await response.json();
@@ -1062,6 +1054,43 @@ $("#browser-forward").addEventListener("click", () => {
   state.browser.position += 1;
   navigateBrowser(state.browser.history[state.browser.position], { historyNavigation: true });
   updateBrowserControls();
+});
+
+$("#message-compose").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const conversation = state.conversations.find(
+    (item) => item.destination_hash === state.activeConversation,
+  );
+  const input = $("#message-body");
+  const submit = $("#message-compose button");
+  if (!conversation || !input.value.trim()) return;
+  submit.disabled = true;
+  $("#message-compose-error").textContent = "";
+  try {
+    const response = await fetch("/api/v1/messages", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        destination_hash: conversation.destination_hash,
+        title: "",
+        content: input.value,
+        delivery_method: "automatic",
+      }),
+    });
+    const body = await response.json();
+    if (!response.ok) throw new Error(body.error || "Delivery failed");
+    input.value = "";
+    await loadConversations();
+    const current = state.conversations.find(
+      (item) => item.destination_hash === state.activeConversation,
+    );
+    if (current) await openConversation(current);
+    input.focus();
+  } catch (error) {
+    $("#message-compose-error").textContent = error.message;
+  } finally {
+    submit.disabled = false;
+  }
 });
 
 const composeDialog = $("#compose-dialog");

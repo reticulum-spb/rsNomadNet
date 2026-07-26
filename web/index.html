@@ -22,9 +22,15 @@
 
     <aside class="sidebar">
       <nav aria-label="Main navigation">
-        <button class="nav-item active" data-view="messages">
-          <span class="nav-icon">◫</span><span>Messages</span>
-        </button>
+        <div class="nav-branch">
+          <button class="nav-item active" data-view="messages">
+            <span class="nav-icon">◫</span><span>Messages</span>
+          </button>
+          <div class="nav-children" aria-label="Message conversations">
+            <div id="conversation-list"></div>
+            <button class="nav-action-item" id="new-message">＋ New message</button>
+          </div>
+        </div>
         <button class="nav-item" data-view="network">
           <span class="nav-icon">⌁</span><span>Network</span>
         </button>
@@ -46,27 +52,12 @@
 
     <main>
       <section class="view active" id="view-messages">
-        <div class="page-heading">
-          <div>
-            <span class="eyebrow">LXMF</span>
-            <h1>Messages</h1>
-            <p>Private conversations across your Reticulum network.</p>
-          </div>
-          <button class="primary" id="new-message">New message</button>
-        </div>
-        <div class="split-panel">
-          <div class="conversation-list" id="conversation-list">
-            <div class="empty compact">
-              <span class="empty-icon">◇</span>
-              <strong>No conversations yet</strong>
-              <span>Incoming LXMF messages will appear here.</span>
-            </div>
-          </div>
+        <div class="messages-panel">
           <div class="conversation-stage">
             <div class="empty" id="conversation-empty">
               <span class="empty-icon">◈</span>
               <strong>Select a conversation</strong>
-              <span>Choose a peer or start a new encrypted message.</span>
+              <span>Choose a peer from the menu or start a new encrypted message.</span>
             </div>
             <div class="message-thread" id="message-thread" hidden>
               <header>
@@ -74,9 +65,14 @@
                 <code id="thread-hash"></code>
               </header>
               <div class="message-list" id="message-list"></div>
+              <form class="message-compose" id="message-compose">
+                <input id="message-body" placeholder="Message" autocomplete="off" required>
+                <button class="primary">Send</button>
+              </form>
             </div>
           </div>
         </div>
+        <p class="form-error" id="message-compose-error"></p>
       </section>
 
       <section class="view" id="view-network">
