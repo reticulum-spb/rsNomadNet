@@ -652,19 +652,20 @@ $$(".nav-item").forEach((button) => {
 });
 
 function renderRrc() {
-  const hubs = [...state.rrc.hubs.values()];
+  const hubs = [...state.rrc.hubs.values()].filter((hub) => hub.connected);
   const hubItems = hubs.map((hub) => {
     const button = document.createElement("button");
     button.className = "rrc-hub-item";
     button.classList.toggle("active", hub.destination_hash === state.rrc.activeHub);
-    button.classList.toggle("disconnected", !hub.connected);
     const unread = hub.rooms.reduce(
       (total, room) => total + (state.rrc.unreadRooms.get(rrcRoomKey(hub.destination_hash, room)) || 0),
       0,
     );
     button.classList.toggle("unread", unread > 0);
-    button.textContent = `${hub.name || shortHash(hub.destination_hash)}${unread ? ` (${unread})` : ""} · ${hub.detail}`;
+    button.textContent = `${hub.name || shortHash(hub.destination_hash)}${unread ? ` (${unread})` : ""}`;
     button.title = [
+      hub.detail || null,
+      hub.destination_hash,
       hub.version ? `version ${hub.version}` : null,
       hub.supports_resources ? "Resources" : null,
       hub.supports_actions ? "Actions" : null,
@@ -674,6 +675,7 @@ function renderRrc() {
       hub.max_message_bytes ? `message limit ${hub.max_message_bytes} bytes` : null,
     ].filter(Boolean).join(" · ");
     button.addEventListener("click", () => {
+      switchView("rrc");
       state.rrc.activeHub = hub.destination_hash;
       if (!hub.rooms.includes(state.rrc.activeRoom)) state.rrc.activeRoom = hub.rooms[0] || null;
       markRrcRoomRead(state.rrc.activeHub, state.rrc.activeRoom);
@@ -683,12 +685,6 @@ function renderRrc() {
     });
     return button;
   });
-  if (!hubItems.length) {
-    const empty = document.createElement("div");
-    empty.className = "empty compact";
-    empty.innerHTML = "<strong>No connected hubs</strong>";
-    hubItems.push(empty);
-  }
   $("#rrc-hubs").replaceChildren(...hubItems);
   const activeHub = state.rrc.hubs.get(state.rrc.activeHub);
   const rooms = activeHub?.rooms || [];

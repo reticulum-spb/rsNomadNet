@@ -31,9 +31,12 @@
         <button class="nav-item" data-view="browser">
           <span class="nav-icon">◎</span><span>Browser</span>
         </button>
-        <button class="nav-item" data-view="rrc">
-          <span class="nav-icon">#</span><span>RRC</span>
-        </button>
+        <div class="nav-branch">
+          <button class="nav-item" data-view="rrc">
+            <span class="nav-icon">#</span><span>RRC</span>
+          </button>
+          <div class="nav-children" id="rrc-hubs" aria-label="Connected RRC hubs"></div>
+        </div>
       </nav>
       <div class="identity-card">
         <span class="eyebrow">Local identity</span>
@@ -128,7 +131,6 @@
       </section>
 
       <section class="view" id="view-rrc">
-        <div class="page-heading"><div><span class="eyebrow">Realtime rooms</span><h1>RRC</h1><p>Connect to compatible rsRRCD and Python RRC hubs.</p></div></div>
         <div class="rrc-connect">
           <input id="rrc-hub" placeholder="RRC hub destination hash" maxlength="32">
           <input id="rrc-nick" placeholder="Nickname" maxlength="32">
@@ -136,7 +138,6 @@
         </div>
         <p class="form-error" id="rrc-error"></p>
         <div class="rrc-layout">
-          <aside id="rrc-hubs"><div class="empty compact"><strong>No connected hubs</strong></div></aside>
           <div class="rrc-room">
             <div class="rrc-status" id="rrc-status" data-state="idle">
               <span class="status-dot"></span>
