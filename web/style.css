@@ -86,17 +86,22 @@ main { min-width: 0; padding: 42px; overflow: hidden; }
 .thread-actions { display: flex; align-items: center; gap: 8px; }
 .thread-actions input { width: min(30vw, 280px); padding: 8px 10px; color: var(--text); border: 1px solid var(--border); border-radius: 7px; background: #090c0b; }
 .thread-actions button { padding: 8px 10px; font-size: 11px; }
-.message-list { display: flex; flex-direction: column; gap: 12px; min-height: 0; padding: 24px; overflow-y: auto; }
+.message-list { display: flex; flex-direction: column; gap: 3px; min-height: 0; padding: 18px; overflow-y: auto; }
 .message-compose { display: flex; gap: 9px; padding: 12px; border-top: 1px solid var(--border); }
 .message-compose input { flex: 1; min-width: 0; padding: 10px 12px; color: var(--text); border: 1px solid var(--border); border-radius: 8px; background: #090c0b; }
-.message { align-self: flex-start; max-width: min(76%, 620px); padding: 12px 14px; border: 1px solid var(--border); border-radius: 5px 14px 14px; background: var(--panel-2); }
-.message.outbound { align-self: flex-end; border-color: #42542a; border-radius: 14px 5px 14px 14px; background: #202a19; }
-.message strong { display: block; margin-bottom: 5px; }
-.message p { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.5; }
-.message small { display: block; margin-top: 8px; color: var(--muted); font-size: 10px; text-align: right; }
-.message details { margin-top: 7px; color: var(--muted); font-size: 10px; }
-.message summary { cursor: pointer; text-align: right; }
-.message dl { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 4px 9px; margin: 8px 0 0; padding-top: 8px; border-top: 1px solid var(--border); }
+.message { width: 100%; padding: 3px 7px; border-left: 2px solid transparent; }
+.message.outbound { border-left-color: var(--accent); background: var(--accent-dim); }
+.message-line { display: grid; grid-template-columns: max-content minmax(0, 1fr) max-content; align-items: start; gap: 8px; min-width: 0; }
+.message time { padding-top: 2px; color: #59635e; font-size: 10px; line-height: 1.5; }
+.message-content { min-width: 0; white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.45; }
+.message-details { color: var(--muted); font-size: 10px; text-align: right; }
+.message-details summary { width: 20px; color: #59635e; cursor: pointer; list-style: none; text-align: center; font-size: 13px; }
+.message-details summary::-webkit-details-marker { display: none; }
+.message-details summary:hover, .message-details[open] summary { color: var(--accent); }
+.message-details[open] { grid-column: 2 / 4; margin-top: 3px; padding: 8px 0 5px; text-align: left; }
+.message-details[open] summary { margin-left: auto; }
+.message-status { display: block; margin-bottom: 7px; color: var(--muted); text-align: right; }
+.message dl { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 4px 9px; margin: 0; padding-top: 8px; border-top: 1px solid var(--border); }
 .message dt { color: var(--muted); }
 .message dd { margin: 0; color: var(--text); overflow-wrap: anywhere; }
 .empty { display: flex; flex-direction: column; align-items: center; gap: 9px; max-width: 380px; padding: 36px; color: var(--muted); text-align: center; }
@@ -243,7 +248,7 @@ dialog input:focus, dialog textarea:focus, dialog select:focus { border-color: v
   .thread-actions { width: 100%; }
   .thread-actions input { flex: 1; width: auto; min-width: 0; }
   .message-list { padding: 14px; }
-  .message { max-width: 92%; }
+  .message { max-width: none; }
   .metric-grid { grid-template-columns: repeat(2, 1fr); }
   .table-card { overflow-x: auto; }
   .rrc-layout { grid-template-columns: 1fr; height: auto; max-height: none; }

@@ -779,17 +779,27 @@ function renderConversationMessages() {
   $("#message-list").replaceChildren(...messages.map((message) => {
     const article = document.createElement("article");
     article.className = `message ${message.outbound ? "outbound" : "inbound"}`;
-    const title = document.createElement("strong");
-    title.textContent = message.title;
-    title.hidden = !message.title;
-    const body = document.createElement("p");
-    body.textContent = message.content;
-    const meta = document.createElement("small");
+    const line = document.createElement("div");
+    line.className = "message-line";
+    const time = document.createElement("time");
+    const timestamp = new Date(message.timestamp * 1000);
+    time.dateTime = timestamp.toISOString();
+    time.textContent = timestamp.toLocaleTimeString([], {
+      hour: "2-digit",
+      minute: "2-digit",
+    });
+    const body = document.createElement("span");
+    body.className = "message-content";
+    body.textContent = message.title
+      ? `${message.title}: ${message.content}`
+      : message.content;
     const method = message.delivery_method === "incoming" ? "received" : message.delivery_method;
-    meta.textContent = `${new Date(message.timestamp * 1000).toLocaleString()} · ${message.state.replaceAll("_", " ")} · ${method}`;
     const details = document.createElement("details");
+    details.className = "message-details";
     const summary = document.createElement("summary");
-    summary.textContent = "Details";
+    summary.textContent = "ⓘ";
+    summary.title = "Message details";
+    summary.setAttribute("aria-label", "Message details");
     const values = [
       ["Message hash", message.message_hash],
       ["Signature", message.outbound ? "local message" : (
@@ -803,6 +813,9 @@ function renderConversationMessages() {
       ["Last error", message.last_error],
     ].filter(([, value]) => value);
     const list = document.createElement("dl");
+    const status = document.createElement("span");
+    status.className = "message-status";
+    status.textContent = `${message.state.replaceAll("_", " ")} · ${method}`;
     for (const [label, value] of values) {
       const term = document.createElement("dt");
       term.textContent = label;
@@ -810,8 +823,9 @@ function renderConversationMessages() {
       description.textContent = value;
       list.append(term, description);
     }
-    details.append(summary, list);
-    article.append(title, body, meta, details);
+    details.append(summary, status, list);
+    line.append(time, body, details);
+    article.append(line);
     return article;
   }));
   $("#message-list").scrollTop = $("#message-list").scrollHeight;
