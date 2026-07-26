@@ -110,8 +110,9 @@ main { min-width: 0; padding: 42px; overflow: hidden; }
 .empty-icon { color: var(--accent); font-size: 32px; }
 
 .metric-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; margin-bottom: 18px; }
-.network-panel { height: min(820px, calc(100vh - 156px)); min-height: 480px; padding: 26px; border: 1px solid var(--border); border-radius: 14px; background: var(--panel); overflow-y: auto; overscroll-behavior: contain; }
-.network-panel .page-heading { margin-bottom: 24px; }
+.network-panel { display: grid; grid-template-rows: auto auto minmax(0, 1fr); height: min(820px, calc(100vh - 156px)); min-height: 480px; padding: 26px; border: 1px solid var(--border); border-radius: 14px; background: var(--panel); overflow: hidden; }
+.network-panel .page-heading { margin-bottom: 6px; }
+.interfaces-panel { height: min(820px, calc(100vh - 156px)); min-height: 480px; padding: 26px; border: 1px solid var(--border); border-radius: 14px; background: var(--panel); overflow-y: auto; overscroll-behavior: contain; }
 .metric { display: grid; gap: 14px; padding: 18px; border: 1px solid var(--border); border-radius: 12px; background: linear-gradient(145deg, var(--panel-2), var(--panel)); }
 .metric span { color: var(--muted); font-size: 12px; }
 .metric strong { font-size: 24px; letter-spacing: -.03em; }
@@ -129,7 +130,7 @@ td.offline { color: var(--danger); }
 .directory-controls label { display: flex; align-items: center; gap: 5px; color: var(--muted); font-size: 11px; cursor: pointer; }
 .directory-controls input { margin: 0; accent-color: var(--accent); }
 .muted { color: var(--muted); font-size: 11px; }
-.directory-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); gap: 12px; }
+.directory-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); align-content: start; gap: 12px; min-height: 0; overflow-y: auto; overscroll-behavior: contain; }
 .directory-grid > .empty { grid-column: 1 / -1; border: 1px dashed var(--border); border-radius: 12px; }
 .directory-card { position: relative; display: grid; gap: 9px; min-width: 0; padding: 15px; border: 1px solid var(--border); border-radius: 11px; background: linear-gradient(145deg, var(--panel-2), var(--panel)); }
 .directory-card header { display: flex; align-items: center; justify-content: space-between; }
@@ -251,6 +252,7 @@ dialog input:focus, dialog textarea:focus, dialog select:focus { border-color: v
   main { padding: 20px 12px; }
   .messages-panel { height: calc(100vh - 104px); min-height: 420px; }
   .network-panel { height: calc(100vh - 104px); min-height: 420px; padding: 18px 12px; }
+  .interfaces-panel { height: calc(100vh - 104px); min-height: 420px; padding: 18px 12px; }
   .directory-heading { align-items: stretch; flex-direction: column; gap: 12px; }
   .directory-controls { align-items: flex-start; justify-content: space-between; flex-direction: column; gap: 8px; }
   .message-thread > header { align-items: stretch; flex-direction: column; }
