@@ -372,7 +372,7 @@ function renderDirectory() {
     if (state.directory.length) {
       empty.innerHTML = "<strong>No matching destinations</strong><span>Enable another destination type to show it.</span>";
     } else {
-      empty.innerHTML = "<strong>No announces received</strong><span>Peers and NomadNet nodes will appear as they announce.</span>";
+      empty.innerHTML = "<strong>No announces received</strong><span>Peers, NomadNet nodes, propagation nodes, and RRC hubs will appear as they announce.</span>";
     }
     grid.replaceChildren(empty);
   } else {
@@ -395,7 +395,17 @@ function renderDirectory() {
       meta.className = "muted";
       meta.textContent = `${entry.hops} hop${entry.hops === 1 ? "" : "s"}${entry.active ? "" : " · inactive"}`;
       card.append(header, name, hash, meta);
-      if (entry.delivery_hash) {
+      if (entry.kind === "rrc") {
+        const connect = document.createElement("button");
+        connect.className = "text-button";
+        connect.textContent = "Connect";
+        connect.addEventListener("click", () => {
+          $("#rrc-hub").value = entry.destination_hash;
+          $("#rrc-connect-error").textContent = "";
+          rrcConnectDialog.showModal();
+        });
+        card.append(connect);
+      } else if (entry.delivery_hash) {
         const message = document.createElement("button");
         message.className = "text-button";
         message.textContent = "Message";

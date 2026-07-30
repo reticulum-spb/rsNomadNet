@@ -31,9 +31,9 @@ The current development slice provides:
   status, and optional technical details for message hashes, signatures,
   timestamps, attempts, propagation nodes, and errors;
 - live and cached announce discovery for `lxmf.delivery`,
-  `nomadnetwork.node`, and `lxmf.propagation`;
-- a persistent directory of peers, remote NomadNet nodes, and propagation
-  nodes;
+  `nomadnetwork.node`, `lxmf.propagation`, and `rrc.hub`;
+- a persistent directory of peers, remote NomadNet nodes, propagation nodes,
+  and RRC hubs;
 - remote `/page/` requests over Reticulum Link, including Resource responses;
 - a 1 MiB page limit plus bounded line count and line length before Micron AST
   construction;

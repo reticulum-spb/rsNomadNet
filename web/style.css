@@ -144,6 +144,7 @@ td.offline { color: var(--danger); }
 .kind.node { color: #82cfff; border-color: #284b5c; background: #152832; }
 .kind.peer { color: var(--accent); border-color: #42542a; background: #202a19; }
 .kind.propagation { color: #d5a7ff; border-color: #4d3761; background: #291d34; }
+.kind.rrc { color: #ffbd75; border-color: #624423; background: #322416; }
 .text-button { justify-self: start; padding: 0; color: var(--accent); border: 0; background: none; font-size: 11px; font-weight: 700; cursor: pointer; }
 
 .address-bar { display: flex; gap: 10px; padding: 12px; border: 1px solid var(--border); border-radius: 12px; background: var(--panel); }

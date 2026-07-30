@@ -145,6 +145,7 @@ async fn run(state: Arc<AppState>) -> anyhow::Result<()> {
     let mut delivery_announces = announce_stream(&runtime, Some("lxmf.delivery")).await?;
     let mut node_announces = announce_stream(&runtime, Some("nomadnetwork.node")).await?;
     let mut propagation_announces = announce_stream(&runtime, Some("lxmf.propagation")).await?;
+    let mut rrc_announces = announce_stream(&runtime, Some("rrc.hub")).await?;
     seed_cached_announces(&state, &runtime).await;
     let rrc_private_key = delivery
         .identity()
@@ -279,6 +280,11 @@ async fn run(state: Arc<AppState>) -> anyhow::Result<()> {
             announce = propagation_announces.recv() => {
                 if let Some(announce) = announce {
                     process_announce(&state, announce, DirectoryKind::Propagation);
+                }
+            }
+            announce = rrc_announces.recv() => {
+                if let Some(announce) = announce {
+                    process_announce(&state, announce, DirectoryKind::Rrc);
                 }
             }
             result = outbound_result_rx.recv() => {
@@ -520,6 +526,7 @@ async fn seed_cached_announces(state: &Arc<AppState>, runtime: &reticulum::Retic
     let delivery_name = rns_identity::name_hash::name_hash("lxmf.delivery");
     let node_name = rns_identity::name_hash::name_hash("nomadnetwork.node");
     let propagation_name = rns_identity::name_hash::name_hash("lxmf.propagation");
+    let rrc_name = rns_identity::name_hash::name_hash("rrc.hub");
     for entry in entries {
         let kind = if entry.name_hash == delivery_name {
             DirectoryKind::Peer
@@ -527,6 +534,8 @@ async fn seed_cached_announces(state: &Arc<AppState>, runtime: &reticulum::Retic
             DirectoryKind::Node
         } else if entry.name_hash == propagation_name {
             DirectoryKind::Propagation
+        } else if entry.name_hash == rrc_name {
+            DirectoryKind::Rrc
         } else {
             continue;
         };
@@ -557,6 +566,7 @@ enum DirectoryKind {
     Peer,
     Node,
     Propagation,
+    Rrc,
 }
 
 struct OutboundAttemptResult {
@@ -595,6 +605,10 @@ fn process_announce(
             .app_data
             .as_deref()
             .and_then(lxmf_core::handlers::pn_name_from_app_data),
+        DirectoryKind::Rrc => announce
+            .app_data
+            .as_deref()
+            .and_then(rrc_hub_name_from_app_data),
     };
     let active = match kind {
         DirectoryKind::Propagation => announce
@@ -612,6 +626,7 @@ fn process_announce(
             DirectoryKind::Peer => "peer",
             DirectoryKind::Node => "node",
             DirectoryKind::Propagation => "propagation",
+            DirectoryKind::Rrc => "rrc",
         }
         .into(),
         display_name,
@@ -627,6 +642,18 @@ fn process_announce(
         return;
     }
     let _ = state.events.send(ServerEvent::DirectoryChanged(entry));
+}
+
+fn rrc_hub_name_from_app_data(data: &[u8]) -> Option<String> {
+    let serde_cbor::Value::Map(fields) = serde_cbor::from_slice(data).ok()? else {
+        return None;
+    };
+    let hub = fields.get(&serde_cbor::Value::Text("hub".into()))?;
+    let serde_cbor::Value::Text(name) = hub else {
+        return None;
+    };
+    let name = sanitise_name(name);
+    (!name.is_empty()).then_some(name)
 }
 
 fn sanitise_name(value: &str) -> String {
@@ -1267,5 +1294,33 @@ mod tests {
             Some("docs/report.txt")
         );
         assert!(filename_from_resource_metadata(b"not messagepack").is_none());
+    }
+
+    #[test]
+    fn reads_rrc_hub_name_from_announce_app_data() {
+        let app_data = serde_cbor::to_vec(&serde_cbor::Value::Map(
+            [
+                (
+                    serde_cbor::Value::Text("proto".into()),
+                    serde_cbor::Value::Text("rrc".into()),
+                ),
+                (
+                    serde_cbor::Value::Text("v".into()),
+                    serde_cbor::Value::Integer(1),
+                ),
+                (
+                    serde_cbor::Value::Text("hub".into()),
+                    serde_cbor::Value::Text(" Test Hub ".into()),
+                ),
+            ]
+            .into_iter()
+            .collect(),
+        ))
+        .unwrap();
+        assert_eq!(
+            rrc_hub_name_from_app_data(&app_data).as_deref(),
+            Some("Test Hub")
+        );
+        assert!(rrc_hub_name_from_app_data(b"not cbor").is_none());
     }
 }
