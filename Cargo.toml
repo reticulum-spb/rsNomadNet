@@ -6,6 +6,19 @@ rust-version = "1.85"
 license = "AGPL-3.0-or-later"
 description = "A web client compatible with NomadNet"
 
+[features]
+default = ["reticulum-full"]
+reticulum-full = [
+    "lxmf-core/reticulum-full",
+    "rns-runtime/full",
+    "rs-rrc-client/reticulum-full",
+]
+reticulum-client = [
+    "lxmf-core/reticulum-client",
+    "rns-runtime/client",
+    "rs-rrc-client/reticulum-client",
+]
+
 [[bin]]
 name = "nomadnet-rs"
 path = "src/main.rs"
@@ -17,17 +30,17 @@ bytes = "1"
 clap = { version = "4", features = ["derive"] }
 futures-util = "0.3"
 hex = "0.4"
-lxmf-core = { path = "../rsLXMF/crates/lxmf-core" }
+lxmf-core = { path = "../rsLXMF/crates/lxmf-core", default-features = false, features = ["sqlite-bundled"] }
 rns-crypto = { path = "../rsReticulum/crates/rns-crypto" }
 rns-identity = { path = "../rsReticulum/crates/rns-identity" }
-rns-runtime = { path = "../rsReticulum/crates/rns-runtime" }
+rns-runtime = { path = "../rsReticulum/crates/rns-runtime", default-features = false }
 rns-transport = { path = "../rsReticulum/crates/rns-transport" }
 rns-wire = { path = "../rsReticulum/crates/rns-wire" }
 rusqlite = { version = "0.32", features = ["bundled"] }
 rmpv = "1"
 serde = { version = "1", features = ["derive"] }
 serde_cbor = "0.11"
-rs-rrc-client = { path = "../rsRRC-client" }
+rs-rrc-client = { path = "../rsRRC-client", default-features = false }
 serde_json = "1"
 thiserror = "2"
 tokio = { version = "1", features = ["full"] }
