@@ -17,6 +17,7 @@ use tower_http::trace::TraceLayer;
 use crate::app::AppState;
 use crate::browser::NomadUrl;
 use crate::models::{SendMessageRequest, ServerEvent};
+use crate::service::{AppError, AppService, FetchPage, SendMessage};
 
 const INDEX: &str = include_str!("../web/index.html");
 const APP_JS: &str = include_str!("../web/app.js");
@@ -785,7 +786,7 @@ async fn health() -> Json<serde_json::Value> {
 }
 
 async fn snapshot(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
-    let network = state.network.read().await.clone();
+    let network = AppService::new(state).network_snapshot().await;
     Json(json!({
         "network": network,
         "features": {
@@ -798,18 +799,7 @@ async fn snapshot(State(state): State<Arc<AppState>>) -> Json<serde_json::Value>
 }
 
 async fn identity_settings(State(state): State<Arc<AppState>>) -> Response {
-    let network = state.network.read().await;
-    let name = match state.database.setting("announce_name") {
-        Ok(Some(name)) => name,
-        Ok(None) => "rsNomadNet".into(),
-        Err(error) => return internal_error(error),
-    };
-    Json(json!({
-        "destination_hash": network.destination_hash,
-        "name": name,
-        "online": matches!(network.state, crate::models::NetworkState::Online),
-    }))
-    .into_response()
+    service_response(AppService::new(state).identity_settings().await)
 }
 
 #[derive(serde::Deserialize)]
@@ -823,65 +813,19 @@ async fn update_identity(
     State(state): State<Arc<AppState>>,
     Json(request): Json<IdentitySettingsRequest>,
 ) -> Response {
-    let name = request
-        .name
-        .chars()
-        .filter(|character| !character.is_control())
-        .take(128)
-        .collect::<String>()
-        .trim()
-        .to_string();
-    if let Err(error) = state.database.set_setting("announce_name", &name) {
-        return internal_error(error);
-    }
-    let online = matches!(
-        state.network.read().await.state,
-        crate::models::NetworkState::Online
-    );
-    if !online {
-        if request.announce_now {
-            return (
-                StatusCode::SERVICE_UNAVAILABLE,
-                Json(json!({"error": "Reticulum is not online", "name": name})),
-            )
-                .into_response();
-        }
-        return Json(json!({"name": name, "announced": false})).into_response();
-    }
-    let (response_tx, response_rx) = oneshot::channel();
-    if state
-        .network_commands
-        .send(crate::network::NetworkCommand::SetAnnounceName {
-            name: (!name.is_empty()).then_some(name.clone()),
-            announce_now: request.announce_now,
-            response: response_tx,
-        })
-        .await
-        .is_err()
-    {
-        return unavailable("network service is unavailable");
-    }
-    match response_rx.await {
-        Ok(Ok(())) => {
-            Json(json!({"name": name, "announced": request.announce_now})).into_response()
-        }
-        Ok(Err(error)) => (StatusCode::BAD_GATEWAY, Json(json!({"error": error}))).into_response(),
-        Err(_) => unavailable("network service stopped"),
-    }
+    service_response(
+        AppService::new(state)
+            .update_identity(request.name, request.announce_now)
+            .await,
+    )
 }
 
 async fn conversations(State(state): State<Arc<AppState>>) -> Response {
-    match state.database.conversations() {
-        Ok(value) => Json(value).into_response(),
-        Err(error) => internal_error(error),
-    }
+    service_response(AppService::new(state).conversations())
 }
 
 async fn directory(State(state): State<Arc<AppState>>) -> Response {
-    match state.database.directory() {
-        Ok(value) => Json(value).into_response(),
-        Err(error) => internal_error(error),
-    }
+    service_response(AppService::new(state).directory())
 }
 
 async fn messages(
@@ -889,27 +833,7 @@ async fn messages(
     Path(destination_hash): Path<String>,
     Query(query): Query<MessageQuery>,
 ) -> Response {
-    if parse_hash(&destination_hash).is_err() {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(json!({"error": "destination hash must contain 32 hexadecimal characters"})),
-        )
-            .into_response();
-    }
-    let destination_hash = destination_hash.to_lowercase();
-    let result = match query
-        .q
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    {
-        Some(query) => state.database.search_messages(&destination_hash, query),
-        None => state.database.messages(&destination_hash),
-    };
-    match result {
-        Ok(value) => Json(value).into_response(),
-        Err(error) => internal_error(error),
-    }
+    service_response(AppService::new(state).messages(&destination_hash, query.q.as_deref()))
 }
 
 #[derive(Default, serde::Deserialize)]
@@ -921,19 +845,9 @@ async fn mark_conversation_read(
     State(state): State<Arc<AppState>>,
     Path(destination_hash): Path<String>,
 ) -> Response {
-    if parse_hash(&destination_hash).is_err() {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(json!({"error": "invalid destination hash"})),
-        )
-            .into_response();
-    }
-    match state
-        .database
-        .mark_conversation_read(&destination_hash.to_lowercase())
-    {
+    match AppService::new(state).mark_conversation_read(&destination_hash) {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
-        Err(error) => internal_error(error),
+        Err(error) => service_error(error),
     }
 }
 
@@ -941,28 +855,9 @@ async fn clear_conversation(
     State(state): State<Arc<AppState>>,
     Path(destination_hash): Path<String>,
 ) -> Response {
-    if parse_hash(&destination_hash).is_err() {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(json!({"error": "invalid destination hash"})),
-        )
-            .into_response();
-    }
-    let destination_hash = destination_hash.to_lowercase();
-    match state.database.conversation_has_pending(&destination_hash) {
-        Ok(true) => {
-            return (
-                StatusCode::CONFLICT,
-                Json(json!({"error": "conversation has messages awaiting delivery"})),
-            )
-                .into_response();
-        }
-        Ok(false) => {}
-        Err(error) => return internal_error(error),
-    }
-    match state.database.clear_conversation(&destination_hash) {
+    match AppService::new(state).clear_conversation(&destination_hash) {
         Ok(deleted) => Json(json!({"deleted": deleted})).into_response(),
-        Err(error) => internal_error(error),
+        Err(error) => service_error(error),
     }
 }
 
@@ -971,27 +866,13 @@ struct DraftRequest {
     content: String,
 }
 
-fn valid_draft_target(scope: &str, target: &str) -> bool {
-    matches!(scope, "lxmf" | "rrc")
-        && !target.is_empty()
-        && target.len() <= 256
-        && !target.chars().any(char::is_control)
-}
-
 async fn get_draft(
     State(state): State<Arc<AppState>>,
     Path((scope, target)): Path<(String, String)>,
 ) -> Response {
-    if !valid_draft_target(&scope, &target) {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(json!({"error": "invalid draft target"})),
-        )
-            .into_response();
-    }
-    match state.database.draft(&scope, &target) {
-        Ok(content) => Json(json!({"content": content.unwrap_or_default()})).into_response(),
-        Err(error) => internal_error(error),
+    match AppService::new(state).draft(&scope, &target) {
+        Ok(content) => Json(json!({"content": content})).into_response(),
+        Err(error) => service_error(error),
     }
 }
 
@@ -1000,23 +881,9 @@ async fn save_draft(
     Path((scope, target)): Path<(String, String)>,
     Json(request): Json<DraftRequest>,
 ) -> Response {
-    if !valid_draft_target(&scope, &target) || request.content.len() > 1024 * 1024 {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(json!({"error": "invalid draft"})),
-        )
-            .into_response();
-    }
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs() as i64;
-    match state
-        .database
-        .save_draft(&scope, &target, &request.content, now)
-    {
+    match AppService::new(state).save_draft(&scope, &target, &request.content) {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
-        Err(error) => internal_error(error),
+        Err(error) => service_error(error),
     }
 }
 
@@ -1024,96 +891,18 @@ async fn send_message(
     State(state): State<Arc<AppState>>,
     Json(request): Json<SendMessageRequest>,
 ) -> Response {
-    if parse_hash(&request.destination_hash).is_err() {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(json!({"error": "destination hash must contain 32 hexadecimal characters"})),
-        )
-            .into_response();
-    }
-    if request.content.trim().is_empty() {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(json!({"error": "message content cannot be empty"})),
-        )
-            .into_response();
-    }
-    if request.title.len() > 1024 || request.content.len() > 1024 * 1024 {
-        return (
-            StatusCode::PAYLOAD_TOO_LARGE,
-            Json(json!({"error": "message exceeds local safety limits"})),
-        )
-            .into_response();
-    }
-    let delivery_method = request.delivery_method.trim().to_ascii_lowercase();
-    if !matches!(
-        delivery_method.as_str(),
-        "" | "auto" | "automatic" | "opportunistic" | "direct" | "propagated"
-    ) {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(json!({"error": "unknown LXMF delivery method"})),
-        )
-            .into_response();
-    }
-    let network = state.network.read().await;
-    if !matches!(network.state, crate::models::NetworkState::Online) {
-        return (
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(json!({"error": "Reticulum is not online"})),
-        )
-            .into_response();
-    }
-    drop(network);
-    let destination_hash = parse_hash(&request.destination_hash).expect("validated above");
-    let propagation_node = match request.propagation_node.as_deref() {
-        Some(value) if !value.trim().is_empty() => match parse_hash(value) {
-            Ok(hash) => Some(hash),
-            Err(_) => {
-                return (
-                    StatusCode::BAD_REQUEST,
-                    Json(json!({"error": "propagation node hash must contain 32 hexadecimal characters"})),
-                )
-                    .into_response();
-            }
-        },
-        _ => None,
-    };
-    if propagation_node.is_some() && delivery_method != "propagated" {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(json!({"error": "propagation_node is only valid for propagated delivery"})),
-        )
-            .into_response();
-    }
-    let (response_tx, response_rx) = oneshot::channel();
-    if state
-        .network_commands
-        .send(crate::network::NetworkCommand::SendMessage {
-            destination_hash,
+    let result = AppService::new(state)
+        .send_message(SendMessage {
+            destination_hash: request.destination_hash,
             title: request.title,
             content: request.content,
-            delivery_method,
-            propagation_node,
-            response: response_tx,
+            delivery_method: request.delivery_method,
+            propagation_node: request.propagation_node,
         })
-        .await
-        .is_err()
-    {
-        return (
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(json!({"error": "network service is unavailable"})),
-        )
-            .into_response();
-    }
-    match response_rx.await {
-        Ok(Ok(message)) => (StatusCode::CREATED, Json(json!(message))).into_response(),
-        Ok(Err(error)) => (StatusCode::BAD_GATEWAY, Json(json!({"error": error}))).into_response(),
-        Err(_) => (
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(json!({"error": "network service stopped"})),
-        )
-            .into_response(),
+        .await;
+    match result {
+        Ok(message) => (StatusCode::CREATED, Json(message)).into_response(),
+        Err(error) => service_error(error),
     }
 }
 
@@ -1130,60 +919,15 @@ async fn fetch_page(
     State(state): State<Arc<AppState>>,
     Json(request): Json<FetchPageRequest>,
 ) -> Response {
-    let url = match NomadUrl::parse(&request.url) {
-        Ok(url) if url.is_page() => url,
-        Ok(_) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(json!({"error": "page fetch requires a /page/ URL"})),
-            )
-                .into_response();
-        }
-        Err(error) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(json!({"error": error.to_string()})),
-            )
-                .into_response();
-        }
-    };
-    if !matches!(
-        state.network.read().await.state,
-        crate::models::NetworkState::Online
-    ) {
-        return (
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(json!({"error": "Reticulum is not online"})),
-        )
-            .into_response();
-    }
-    let (response_tx, response_rx) = oneshot::channel();
-    if state
-        .network_commands
-        .send(crate::network::NetworkCommand::FetchPage {
-            url,
-            reload: request.reload,
-            fields: request.fields,
-            response: response_tx,
-        })
-        .await
-        .is_err()
-    {
-        return (
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(json!({"error": "network service is unavailable"})),
-        )
-            .into_response();
-    }
-    match response_rx.await {
-        Ok(Ok(page)) => Json(json!(page)).into_response(),
-        Ok(Err(error)) => (StatusCode::BAD_GATEWAY, Json(json!({"error": error}))).into_response(),
-        Err(_) => (
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(json!({"error": "network service stopped"})),
-        )
-            .into_response(),
-    }
+    service_response(
+        AppService::new(state)
+            .fetch_page(FetchPage {
+                url: request.url,
+                reload: request.reload,
+                fields: request.fields,
+            })
+            .await,
+    )
 }
 
 async fn events(ws: WebSocketUpgrade, State(state): State<Arc<AppState>>) -> Response {
@@ -1242,6 +986,32 @@ fn internal_error(error: anyhow::Error) -> Response {
         Json(json!({"error": "internal server error"})),
     )
         .into_response()
+}
+
+fn service_response<T: serde::Serialize>(result: Result<T, AppError>) -> Response {
+    match result {
+        Ok(value) => Json(value).into_response(),
+        Err(error) => service_error(error),
+    }
+}
+
+fn service_error(error: AppError) -> Response {
+    let status = match &error {
+        AppError::Invalid(_) => StatusCode::BAD_REQUEST,
+        AppError::TooLarge(_) => StatusCode::PAYLOAD_TOO_LARGE,
+        AppError::Conflict(_) => StatusCode::CONFLICT,
+        AppError::Unavailable(_) => StatusCode::SERVICE_UNAVAILABLE,
+        AppError::Remote(_) => StatusCode::BAD_GATEWAY,
+        AppError::Internal(source) => {
+            tracing::error!(%source, "application service request failed");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": "internal server error"})),
+            )
+                .into_response();
+        }
+    };
+    (status, Json(json!({"error": error.to_string()}))).into_response()
 }
 
 #[cfg(test)]

@@ -6,6 +6,7 @@ pub mod db;
 pub mod models;
 pub mod network;
 pub mod rrc;
+pub mod service;
 
 use std::sync::Arc;
 
