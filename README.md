@@ -110,9 +110,11 @@ on the Tokio worker runtime:
 cargo run --features tui --bin nomadnet-tui -- --offline
 ```
 
-Use `Alt-X` to leave the terminal frontend. Omit `--offline` to start the
-configured Reticulum interfaces. Messaging, RRC interaction, and Micron page
-views will be added on top of the shared `AppService` API.
+Use `Enter` on an LXMF conversation to inspect its history and `F4` to compose
+a message. With no existing conversation, `F4` first asks for the peer's
+32-character destination hash. Use `Alt-X` to leave the terminal frontend.
+Omit `--offline` to start the configured Reticulum interfaces. RRC interaction
+and Micron page views will be added on top of the shared `AppService` API.
 
 The browser interface deliberately omits QR codes, BLE management, page
 hosting, and printing. Reticulum interfaces are exposed only as read-only

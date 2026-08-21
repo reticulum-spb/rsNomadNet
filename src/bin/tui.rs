@@ -8,15 +8,17 @@ use clap::Parser;
 use rsnomadnet_core::Runtime;
 use rsnomadnet_core::config::{AppConfig, Cli};
 use rsnomadnet_core::models::{ConversationSummary, DirectoryEntry, NetworkSnapshot};
-use rsnomadnet_core::service::AppService;
+use rsnomadnet_core::service::{AppService, SendMessage};
 use tv::{
-    Backend, Command, Context, CrosstermBackend, Desktop, DrawCtx, Event, ListBox, Menu, MenuBar,
-    Program, Rect, StatusDef, StatusLine, SystemClock, Theme, View, ViewState, Window, alt,
-    delegate,
+    Backend, Button, ButtonFlags, Command, Context, CrosstermBackend, Desktop, Dialog, DrawCtx,
+    Event, FieldValue, InputLine, Key, KeyEvent, ListBox, Menu, MenuBar, Program, Rect, StaticText,
+    StatusDef, StatusLine, SystemClock, Theme, View, ViewId, ViewState, Window, alt, delegate,
 };
 use tvision_rs as tv;
 
 const REFRESH: Command = Command::custom("rsnomadnet.refresh");
+const OPEN_CONVERSATION: Command = Command::custom("rsnomadnet.open_conversation");
+const COMPOSE_MESSAGE: Command = Command::custom("rsnomadnet.compose_message");
 
 #[derive(Debug, Parser)]
 #[command(version, about = "Terminal frontend for rsNomadNet")]
@@ -32,17 +34,69 @@ struct TuiCli {
 #[derive(Default)]
 struct UiState {
     network: Vec<String>,
-    conversations: Vec<String>,
-    directory: Vec<String>,
+    conversations: Vec<ConversationRow>,
+    directory: Vec<DirectoryRow>,
+    selected_destination_hash: Option<String>,
+}
+
+struct ConversationRow {
+    destination_hash: String,
+    label: String,
+    messages: Vec<String>,
+}
+
+struct DirectoryRow {
+    destination_hash: String,
+    label: String,
+}
+
+enum UiCommand {
+    SendMessage {
+        destination_hash: String,
+        content: String,
+    },
 }
 
 type Shared = Rc<RefCell<UiState>>;
+type SharedText = Rc<RefCell<String>>;
 
 #[derive(Clone, Copy)]
 enum Pane {
     Network,
     Conversations,
     Directory,
+}
+
+struct ComposerInput {
+    input: InputLine,
+    content: SharedText,
+}
+
+impl ComposerInput {
+    fn new(bounds: Rect, content: SharedText) -> Self {
+        Self::with_limit(bounds, content, 4096)
+    }
+
+    fn with_limit(bounds: Rect, content: SharedText, limit: i32) -> Self {
+        Self {
+            input: InputLine::with_limit(bounds, limit),
+            content,
+        }
+    }
+}
+
+#[delegate(to = input)]
+impl View for ComposerInput {
+    fn as_any_mut(&mut self) -> Option<&mut dyn core::any::Any> {
+        Some(self)
+    }
+
+    fn handle_event(&mut self, event: &mut Event, context: &mut Context) {
+        self.input.handle_event(event, context);
+        if let Some(FieldValue::Text(content)) = self.input.value() {
+            *self.content.borrow_mut() = content;
+        }
+    }
 }
 
 struct StateList {
@@ -66,8 +120,34 @@ impl StateList {
         let state = self.state.borrow();
         match self.pane {
             Pane::Network => state.network.clone(),
-            Pane::Conversations => state.conversations.clone(),
-            Pane::Directory => state.directory.clone(),
+            Pane::Conversations => state
+                .conversations
+                .iter()
+                .map(|conversation| conversation.label.clone())
+                .collect(),
+            Pane::Directory => state
+                .directory
+                .iter()
+                .map(|entry| entry.label.clone())
+                .collect(),
+        }
+    }
+
+    fn focused_destination(&self) -> Option<String> {
+        let FieldValue::Int(index) = self.list.value()? else {
+            return None;
+        };
+        let state = self.state.borrow();
+        match self.pane {
+            Pane::Conversations => state
+                .conversations
+                .get(index as usize)
+                .map(|conversation| conversation.destination_hash.clone()),
+            Pane::Directory => state
+                .directory
+                .get(index as usize)
+                .map(|entry| entry.destination_hash.clone()),
+            Pane::Network => None,
         }
     }
 }
@@ -79,6 +159,8 @@ impl View for StateList {
     }
 
     fn handle_event(&mut self, event: &mut Event, context: &mut Context) {
+        let open = matches!(event, Event::KeyDown(key) if key.key == Key::Enter)
+            && matches!(self.pane, Pane::Conversations);
         let refresh = matches!(
             event,
             Event::Broadcast { command, .. } if *command == REFRESH
@@ -89,6 +171,13 @@ impl View for StateList {
             self.list.new_list(lines, context);
         }
         self.list.handle_event(event, context);
+        if let Some(destination_hash) = self.focused_destination() {
+            self.state.borrow_mut().selected_destination_hash = Some(destination_hash);
+        }
+        if open && self.state.borrow().selected_destination_hash.is_some() {
+            context.put_event(Event::Command(OPEN_CONVERSATION));
+            event.clear();
+        }
     }
 }
 
@@ -138,7 +227,11 @@ impl View for PumpView {
             latest = Some(update);
         }
         if let Some(update) = latest {
-            *self.shared.borrow_mut() = update;
+            let selected = self.shared.borrow().selected_destination_hash.clone();
+            *self.shared.borrow_mut() = UiState {
+                selected_destination_hash: selected,
+                ..update
+            };
             context.broadcast(REFRESH, None);
         }
     }
@@ -214,16 +307,21 @@ impl TuiApp {
             Pane::Directory,
         )));
 
-        desktop.insert_view(Box::new(conversations));
         desktop.insert_view(Box::new(network));
         desktop.insert_view(Box::new(directory));
+        // Insert conversations last so it is the initially focused window.
+        desktop.insert_view(Box::new(conversations));
         Some(Box::new(desktop))
     }
 
     fn status_line(mut bounds: Rect) -> Option<Box<dyn View>> {
         bounds.a.y = bounds.b.y - 1;
         let definitions = StatusDef::list()
-            .def_all(|definition| definition.item("~Alt-X~ Exit", alt('x'), Command::QUIT))
+            .def_all(|definition| {
+                definition
+                    .item("~F4~ Compose", KeyEvent::from(Key::F(4)), COMPOSE_MESSAGE)
+                    .item("~Alt-X~ Exit", alt('x'), Command::QUIT)
+            })
             .build();
         Some(Box::new(StatusLine::new(bounds, definitions)))
     }
@@ -231,6 +329,14 @@ impl TuiApp {
     fn menu_bar(mut bounds: Rect) -> Option<Box<dyn View>> {
         bounds.b.y = bounds.a.y + 1;
         let menu = Menu::builder()
+            .submenu("~M~essage", alt('m'), |menu| {
+                menu.command_key(
+                    "~C~ompose",
+                    COMPOSE_MESSAGE,
+                    KeyEvent::from(Key::F(4)),
+                    "F4",
+                )
+            })
             .submenu("~F~ile", alt('f'), |menu| {
                 menu.command_key("E~x~it", Command::QUIT, alt('x'), "Alt-X")
             })
@@ -238,9 +344,172 @@ impl TuiApp {
         Some(Box::new(MenuBar::new(bounds, menu)))
     }
 
-    fn run(&mut self) -> Command {
-        self.program.run_app(|_, _| {})
+    fn run(
+        &mut self,
+        state: Shared,
+        commands: tokio::sync::mpsc::UnboundedSender<UiCommand>,
+    ) -> Command {
+        self.program.run_app(move |program, command| {
+            if command == OPEN_CONVERSATION
+                && let Some(dialog) = conversation_dialog(&state.borrow())
+            {
+                program.exec_view(Box::new(dialog));
+            }
+            if command == COMPOSE_MESSAGE {
+                let destination_hash = match selected_destination(&state.borrow()) {
+                    Some(destination_hash) => destination_hash,
+                    None => {
+                        let (dialog, input_id, destination) = destination_dialog();
+                        let result = program.exec_view_focused(Box::new(dialog), input_id);
+                        if result != Command::OK {
+                            return;
+                        }
+                        let destination_hash = destination.borrow().trim().to_ascii_lowercase();
+                        if !valid_destination_hash(&destination_hash) {
+                            program.exec_view(Box::new(message_dialog(
+                                "Invalid destination",
+                                "Destination hash must contain exactly\n32 hexadecimal characters.",
+                            )));
+                            return;
+                        }
+                        destination_hash
+                    }
+                };
+                let (dialog, input_id, content) = composer_dialog(&destination_hash);
+                let result = program.exec_view_focused(Box::new(dialog), input_id);
+                let content = content.borrow().clone();
+                if result == Command::OK && !content.trim().is_empty() {
+                    let _ = commands.send(UiCommand::SendMessage {
+                        destination_hash,
+                        content,
+                    });
+                }
+            }
+        })
     }
+}
+
+fn destination_dialog() -> (Dialog, ViewId, SharedText) {
+    let mut dialog = Dialog::new(Rect::new(0, 0, 64, 11), Some("New LXMF message".into()));
+    dialog.state_mut().options.center_x = true;
+    dialog.state_mut().options.center_y = true;
+    dialog.insert_child(Box::new(StaticText::new(
+        Rect::new(2, 2, 62, 4),
+        "Enter the peer's LXMF destination hash:",
+    )));
+    let destination = Rc::new(RefCell::new(String::new()));
+    let input_id = dialog.insert_child(Box::new(ComposerInput::with_limit(
+        Rect::new(2, 4, 62, 5),
+        destination.clone(),
+        33,
+    )));
+    dialog.insert_child(Box::new(Button::new(
+        Rect::new(15, 7, 27, 9),
+        "~N~ext",
+        Command::OK,
+        ButtonFlags {
+            default: true,
+            ..ButtonFlags::default()
+        },
+    )));
+    dialog.insert_child(Box::new(Button::new(
+        Rect::new(37, 7, 51, 9),
+        "~C~ancel",
+        Command::CANCEL,
+        ButtonFlags::default(),
+    )));
+    (dialog, input_id, destination)
+}
+
+fn valid_destination_hash(value: &str) -> bool {
+    value.len() == 32 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn message_dialog(title: &str, message: &str) -> Dialog {
+    let mut dialog = Dialog::new(Rect::new(0, 0, 54, 10), Some(title.into()));
+    dialog.state_mut().options.center_x = true;
+    dialog.state_mut().options.center_y = true;
+    dialog.insert_child(Box::new(StaticText::new(Rect::new(3, 2, 51, 6), message)));
+    dialog.insert_child(Box::new(Button::new(
+        Rect::new(21, 6, 33, 8),
+        "~O~K",
+        Command::OK,
+        ButtonFlags {
+            default: true,
+            ..ButtonFlags::default()
+        },
+    )));
+    dialog
+}
+
+fn selected_destination(state: &UiState) -> Option<String> {
+    state.selected_destination_hash.clone().or_else(|| {
+        state
+            .conversations
+            .first()
+            .map(|conversation| conversation.destination_hash.clone())
+    })
+}
+
+fn composer_dialog(destination_hash: &str) -> (Dialog, ViewId, SharedText) {
+    let mut dialog = Dialog::new(Rect::new(0, 0, 70, 12), Some("Send LXMF message".into()));
+    dialog.state_mut().options.center_x = true;
+    dialog.state_mut().options.center_y = true;
+    dialog.insert_child(Box::new(StaticText::new(
+        Rect::new(2, 2, 68, 4),
+        format!("Destination:\n{destination_hash}"),
+    )));
+    let content = Rc::new(RefCell::new(String::new()));
+    let input_id = dialog.insert_child(Box::new(ComposerInput::new(
+        Rect::new(2, 5, 68, 6),
+        content.clone(),
+    )));
+    dialog.insert_child(Box::new(Button::new(
+        Rect::new(18, 8, 30, 10),
+        "~S~end",
+        Command::OK,
+        ButtonFlags {
+            default: true,
+            ..ButtonFlags::default()
+        },
+    )));
+    dialog.insert_child(Box::new(Button::new(
+        Rect::new(40, 8, 54, 10),
+        "~C~ancel",
+        Command::CANCEL,
+        ButtonFlags::default(),
+    )));
+    (dialog, input_id, content)
+}
+
+fn conversation_dialog(state: &UiState) -> Option<Dialog> {
+    let destination_hash = state.selected_destination_hash.as_deref()?;
+    let conversation = state
+        .conversations
+        .iter()
+        .find(|conversation| conversation.destination_hash == destination_hash)?;
+    let mut dialog = Dialog::new(
+        Rect::new(0, 0, 72, 22),
+        Some(format!("LXMF {}", destination_hash)),
+    );
+    dialog.state_mut().options.center_x = true;
+    dialog.state_mut().options.center_y = true;
+    let history = if conversation.messages.is_empty() {
+        "No messages".into()
+    } else {
+        conversation.messages.join("\n\n")
+    };
+    dialog.insert_child(Box::new(StaticText::new(Rect::new(2, 2, 70, 17), history)));
+    dialog.insert_child(Box::new(Button::new(
+        Rect::new(29, 18, 43, 20),
+        "~C~lose",
+        Command::CANCEL,
+        ButtonFlags {
+            default: true,
+            ..ButtonFlags::default()
+        },
+    )));
+    Some(dialog)
 }
 
 async fn snapshot(service: &AppService) -> UiState {
@@ -249,8 +518,9 @@ async fn snapshot(service: &AppService) -> UiState {
     let directory = service.directory().unwrap_or_default();
     UiState {
         network: network_lines(network),
-        conversations: conversation_lines(conversations),
+        conversations: conversation_rows(service, conversations),
         directory: directory_lines(directory),
+        selected_destination_hash: None,
     }
 }
 
@@ -275,38 +545,53 @@ fn network_lines(network: NetworkSnapshot) -> Vec<String> {
     lines
 }
 
-fn conversation_lines(conversations: Vec<ConversationSummary>) -> Vec<String> {
-    if conversations.is_empty() {
-        return vec!["No conversations".into()];
-    }
+fn conversation_rows(
+    service: &AppService,
+    conversations: Vec<ConversationSummary>,
+) -> Vec<ConversationRow> {
     conversations
         .into_iter()
         .map(|conversation| {
-            format!(
-                "{}{}  {}",
-                if conversation.unread > 0 {
-                    format!("[{}] ", conversation.unread)
-                } else {
-                    String::new()
-                },
-                conversation
-                    .display_name
-                    .as_deref()
-                    .unwrap_or(&conversation.destination_hash),
-                conversation.last_message.as_deref().unwrap_or("")
-            )
+            let messages = service
+                .messages(&conversation.destination_hash, None)
+                .unwrap_or_default()
+                .into_iter()
+                .map(|message| {
+                    format!(
+                        "{}  {}\n{}",
+                        if message.outbound { "You" } else { "Peer" },
+                        message.state,
+                        message.content
+                    )
+                })
+                .collect();
+            ConversationRow {
+                destination_hash: conversation.destination_hash.clone(),
+                label: format!(
+                    "{}{}  {}",
+                    if conversation.unread > 0 {
+                        format!("[{}] ", conversation.unread)
+                    } else {
+                        String::new()
+                    },
+                    conversation
+                        .display_name
+                        .as_deref()
+                        .unwrap_or(&conversation.destination_hash),
+                    conversation.last_message.as_deref().unwrap_or("")
+                ),
+                messages,
+            }
         })
         .collect()
 }
 
-fn directory_lines(entries: Vec<DirectoryEntry>) -> Vec<String> {
-    if entries.is_empty() {
-        return vec!["No known destinations".into()];
-    }
+fn directory_lines(entries: Vec<DirectoryEntry>) -> Vec<DirectoryRow> {
     entries
         .into_iter()
-        .map(|entry| {
-            format!(
+        .map(|entry| DirectoryRow {
+            destination_hash: entry.destination_hash.clone(),
+            label: format!(
                 "{} {:<18} {}",
                 if entry.active { "+" } else { "-" },
                 entry.kind,
@@ -314,7 +599,7 @@ fn directory_lines(entries: Vec<DirectoryEntry>) -> Vec<String> {
                     .display_name
                     .as_deref()
                     .unwrap_or(&entry.destination_hash)
-            )
+            ),
         })
         .collect()
 }
@@ -338,17 +623,44 @@ fn main() -> anyhow::Result<()> {
     let initial = tokio.block_on(snapshot(&service));
     let shared = Rc::new(RefCell::new(initial));
     let (sender, updates) = mpsc::channel();
+    let (command_sender, mut commands) = tokio::sync::mpsc::unbounded_channel();
     let bridge = tokio.spawn(async move {
         let mut events = service.subscribe();
-        while events.recv().await.is_ok() {
-            if sender.send(snapshot(&service).await).is_err() {
-                break;
+        loop {
+            tokio::select! {
+                event = events.recv() => {
+                    if event.is_err() || sender.send(snapshot(&service).await).is_err() {
+                        break;
+                    }
+                }
+                command = commands.recv() => {
+                    let Some(command) = command else { break };
+                    match command {
+                        UiCommand::SendMessage { destination_hash, content } => {
+                            let result = service.send_message(SendMessage {
+                                destination_hash,
+                                title: String::new(),
+                                content,
+                                delivery_method: "automatic".into(),
+                                propagation_node: None,
+                            }).await;
+                            let mut update = snapshot(&service).await;
+                            update.network.push(match result {
+                                Ok(_) => "Message queued for delivery".into(),
+                                Err(error) => format!("Send failed: {error}"),
+                            });
+                            if sender.send(update).is_err() {
+                                break;
+                            }
+                        }
+                    }
+                }
             }
         }
     });
 
-    let mut app = TuiApp::new(Box::new(CrosstermBackend::new()?), shared, updates);
-    let _ = app.run();
+    let mut app = TuiApp::new(Box::new(CrosstermBackend::new()?), shared.clone(), updates);
+    let _ = app.run(shared, command_sender);
 
     bridge.abort();
     tokio.block_on(core.shutdown());
@@ -365,8 +677,16 @@ mod tests {
         let (backend, screen) = HeadlessBackend::new(100, 30);
         let state = Rc::new(RefCell::new(UiState {
             network: vec!["State: Online".into()],
-            conversations: vec!["Alice  hello".into()],
-            directory: vec!["+ lxmf.delivery Alice".into()],
+            conversations: vec![ConversationRow {
+                destination_hash: "aabbccddeeff00112233445566778899".into(),
+                label: "Alice  hello".into(),
+                messages: vec!["Peer delivered\nhello".into()],
+            }],
+            directory: vec![DirectoryRow {
+                destination_hash: "aabbccddeeff00112233445566778899".into(),
+                label: "+ lxmf.delivery Alice".into(),
+            }],
+            selected_destination_hash: None,
         }));
         let (_sender, receiver) = mpsc::channel();
         let mut app = TuiApp::new(Box::new(backend), state, receiver);
@@ -376,5 +696,184 @@ mod tests {
         assert!(frame.contains("LXMF Conversations"));
         assert!(frame.contains("Network"));
         assert!(frame.contains("Directory"));
+    }
+
+    #[test]
+    fn conversation_and_composer_dialogs_bind_selected_peer() {
+        let destination_hash = "aabbccddeeff00112233445566778899";
+        let state = UiState {
+            conversations: vec![ConversationRow {
+                destination_hash: destination_hash.into(),
+                label: "Alice".into(),
+                messages: vec!["Peer delivered\nhello".into()],
+            }],
+            selected_destination_hash: Some(destination_hash.into()),
+            ..UiState::default()
+        };
+
+        assert_eq!(
+            selected_destination(&state).as_deref(),
+            Some(destination_hash)
+        );
+        assert!(conversation_dialog(&state).is_some());
+        let (mut composer, input_id, content) = composer_dialog(destination_hash);
+        assert_eq!(
+            composer.find_mut(input_id).and_then(|input| input.value()),
+            Some(FieldValue::Text(String::new()))
+        );
+        assert!(content.borrow().is_empty());
+    }
+
+    #[test]
+    fn f4_opens_composer_and_submits_message() {
+        let destination_hash = "aabbccddeeff00112233445566778899";
+        let (backend, screen) = HeadlessBackend::new(100, 30);
+        let state = Rc::new(RefCell::new(UiState {
+            conversations: vec![ConversationRow {
+                destination_hash: destination_hash.into(),
+                label: "Alice".into(),
+                messages: Vec::new(),
+            }],
+            ..UiState::default()
+        }));
+        let (_update_sender, updates) = mpsc::channel();
+        let (command_sender, mut commands) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = TuiApp::new(Box::new(backend), state.clone(), updates);
+
+        screen.push_key(Key::F(4), tv::KeyModifiers::default());
+        screen.push_paste("hello from TUI");
+        screen.push_event(Event::Command(Command::OK));
+        screen.push_event(Event::Command(Command::QUIT));
+        app.run(state, command_sender);
+
+        match commands.try_recv() {
+            Ok(UiCommand::SendMessage {
+                destination_hash: actual,
+                content,
+            }) => {
+                assert_eq!(actual, destination_hash);
+                assert_eq!(content, "hello from TUI");
+            }
+            Err(error) => panic!("F4 did not submit a compose command: {error}"),
+        }
+    }
+
+    #[test]
+    fn f4_prompts_for_destination_when_no_conversation_exists() {
+        let destination_hash = "aabbccddeeff00112233445566778899";
+        let (backend, screen) = HeadlessBackend::new(100, 30);
+        let state = Rc::new(RefCell::new(UiState::default()));
+        let (_update_sender, updates) = mpsc::channel();
+        let (command_sender, mut commands) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = TuiApp::new(Box::new(backend), state.clone(), updates);
+
+        screen.push_key(Key::F(4), tv::KeyModifiers::default());
+        screen.push_paste(destination_hash);
+        screen.push_event(Event::Command(Command::OK));
+        screen.push_paste("first contact");
+        screen.push_event(Event::Command(Command::OK));
+        screen.push_event(Event::Command(Command::QUIT));
+        app.run(state, command_sender);
+
+        match commands.try_recv() {
+            Ok(UiCommand::SendMessage {
+                destination_hash: actual,
+                content,
+            }) => {
+                assert_eq!(actual, destination_hash);
+                assert_eq!(content, "first contact");
+            }
+            Err(error) => panic!("new-message flow did not submit a command: {error}"),
+        }
+    }
+
+    #[test]
+    fn f4_uses_peer_focused_with_arrow_keys() {
+        let first = "aabbccddeeff00112233445566778899";
+        let second = "00112233445566778899aabbccddeeff";
+        let (backend, screen) = HeadlessBackend::new(100, 30);
+        let state = Rc::new(RefCell::new(UiState {
+            conversations: vec![
+                ConversationRow {
+                    destination_hash: first.into(),
+                    label: "Alice".into(),
+                    messages: Vec::new(),
+                },
+                ConversationRow {
+                    destination_hash: second.into(),
+                    label: "Bob".into(),
+                    messages: Vec::new(),
+                },
+            ],
+            ..UiState::default()
+        }));
+        let (_update_sender, updates) = mpsc::channel();
+        let (command_sender, mut commands) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = TuiApp::new(Box::new(backend), state.clone(), updates);
+
+        screen.push_key(Key::Down, tv::KeyModifiers::default());
+        screen.push_key(Key::F(4), tv::KeyModifiers::default());
+        screen.push_paste("hello Bob");
+        screen.push_event(Event::Command(Command::OK));
+        screen.push_event(Event::Command(Command::QUIT));
+        app.run(state, command_sender);
+
+        match commands.try_recv() {
+            Ok(UiCommand::SendMessage {
+                destination_hash,
+                content,
+            }) => {
+                assert_eq!(destination_hash, second);
+                assert_eq!(content, "hello Bob");
+            }
+            Err(error) => panic!("focused peer was not used by composer: {error}"),
+        }
+    }
+
+    #[test]
+    fn f4_uses_peer_selected_in_directory() {
+        let destination_hash = "00112233445566778899aabbccddeeff";
+        let (backend, screen) = HeadlessBackend::new(100, 30);
+        let state = Rc::new(RefCell::new(UiState {
+            directory: vec![DirectoryRow {
+                destination_hash: destination_hash.into(),
+                label: "+ lxmf.delivery Bob".into(),
+            }],
+            ..UiState::default()
+        }));
+        let (_update_sender, updates) = mpsc::channel();
+        let (command_sender, mut commands) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = TuiApp::new(Box::new(backend), state.clone(), updates);
+
+        screen.push_key(
+            Key::Char('3'),
+            tv::KeyModifiers {
+                alt: true,
+                ..tv::KeyModifiers::default()
+            },
+        );
+        screen.push_key(Key::F(4), tv::KeyModifiers::default());
+        screen.push_paste("hello directory peer");
+        screen.push_event(Event::Command(Command::OK));
+        screen.push_event(Event::Command(Command::QUIT));
+        app.run(state, command_sender);
+
+        match commands.try_recv() {
+            Ok(UiCommand::SendMessage {
+                destination_hash: actual,
+                content,
+            }) => {
+                assert_eq!(actual, destination_hash);
+                assert_eq!(content, "hello directory peer");
+            }
+            Err(error) => panic!("directory peer was not used by composer: {error}"),
+        }
+    }
+
+    #[test]
+    fn destination_hash_validation_is_strict() {
+        assert!(valid_destination_hash("aabbccddeeff00112233445566778899"));
+        assert!(!valid_destination_hash("aabb"));
+        assert!(!valid_destination_hash("zzbbccddeeff00112233445566778899"));
     }
 }
