@@ -110,12 +110,12 @@ on the Tokio worker runtime:
 cargo run --features tui --bin nomadnet-tui -- --offline
 ```
 
-Select a peer in LXMF Conversations or Directory, then press `Enter` or `F4`.
+Select a peer in LXMF Conversations or Directory, then press `Enter`.
 This opens one conversation window containing scrollable message history and
 the new-message field; the selected peer is shown in its title. Use `Alt-X` to
-leave the terminal frontend.
-Omit `--offline` to start the configured Reticulum interfaces. RRC interaction
-and Micron page views will be added on top of the shared `AppService` API.
+leave the terminal frontend. Enter on an RRC hub or NomadNet node in Directory
+opens the corresponding hub or page-browser window.
+Omit `--offline` to start the configured Reticulum interfaces.
 
 The browser interface deliberately omits QR codes, BLE management, page
 hosting, and printing. Reticulum interfaces are exposed only as read-only
