@@ -110,9 +110,10 @@ on the Tokio worker runtime:
 cargo run --features tui --bin nomadnet-tui -- --offline
 ```
 
-Use `Enter` on an LXMF conversation to inspect its history and `F4` to compose
-a message. With no existing conversation, `F4` first asks for the peer's
-32-character destination hash. Use `Alt-X` to leave the terminal frontend.
+Select a peer in LXMF Conversations or Directory, then press `Enter` or `F4`.
+This opens one conversation window containing scrollable message history and
+the new-message field; the selected peer is shown in its title. Use `Alt-X` to
+leave the terminal frontend.
 Omit `--offline` to start the configured Reticulum interfaces. RRC interaction
 and Micron page views will be added on top of the shared `AppService` API.
 
