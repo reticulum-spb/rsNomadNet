@@ -10,7 +10,7 @@ use rsnomadnet_core::Runtime;
 use rsnomadnet_core::browser::{BrowserPage, Inline, MicronBlock};
 use rsnomadnet_core::config::{AppConfig, Cli};
 use rsnomadnet_core::models::{
-    ConversationSummary, DirectoryEntry, NetworkSnapshot, RrcHubView, ServerEvent,
+    ConversationSummary, DirectoryEntry, NetworkSnapshot, RrcHubView, RrcMessageView, ServerEvent,
 };
 use rsnomadnet_core::service::{AppService, FetchPage, SendMessage};
 use tv::{
@@ -26,6 +26,7 @@ const OPEN_CONVERSATION: Command = Command::custom("rsnomadnet.open_conversation
 const SEND_MESSAGE: Command = Command::custom("rsnomadnet.send_message");
 const OPEN_RRC_HUB: Command = Command::custom("rsnomadnet.open_rrc_hub");
 const OPEN_NODE_BROWSER: Command = Command::custom("rsnomadnet.open_node_browser");
+const MAX_DIRECTORY_ROWS: usize = 200;
 
 #[derive(Debug, Parser)]
 #[command(version, about = "Terminal frontend for rsNomadNet")]
@@ -316,11 +317,13 @@ impl View for StateList {
             Event::Broadcast { command, .. } if *command == REFRESH
         );
         if !self.seeded || refresh {
-            self.seeded = true;
             let lines = self.lines();
-            self.list.new_list(lines, context);
-            if let Some(index) = self.selected_index() {
-                self.list.set_value_ctx(FieldValue::Int(index), context);
+            if !self.seeded || self.list.list() != lines {
+                self.seeded = true;
+                self.list.new_list(lines, context);
+                if let Some(index) = self.selected_index() {
+                    self.list.set_value_ctx(FieldValue::Int(index), context);
+                }
             }
         }
         self.list.handle_event(event, context);
@@ -848,7 +851,8 @@ async fn snapshot(service: &AppService) -> UiState {
     }
 }
 
-fn rrc_hub_lines(hub: RrcHubView) -> Vec<String> {
+fn rrc_hub_lines(service: &AppService, hub: RrcHubView) -> Vec<String> {
+    let destination_hash = hub.destination_hash.clone();
     let mut lines = vec![
         format!(
             "State: {}",
@@ -868,7 +872,29 @@ fn rrc_hub_lines(hub: RrcHubView) -> Vec<String> {
         lines.push("Rooms:".into());
         lines.extend(hub.rooms.into_iter().map(|room| format!("  {room}")));
     }
+    let history = service
+        .rrc_history(&destination_hash, None)
+        .unwrap_or_default();
+    if !history.is_empty() {
+        lines.push(String::new());
+        lines.push("Messages:".into());
+        lines.extend(history.into_iter().map(rrc_message_line));
+    }
     lines
+}
+
+fn rrc_message_line(message: RrcMessageView) -> String {
+    let room = message
+        .room
+        .as_deref()
+        .map(|room| format!("#{room} "))
+        .unwrap_or_default();
+    let nick = message.nick.as_deref().unwrap_or(&message.source_hash);
+    if message.kind == "action" {
+        format!("[{room}* {nick}] {}", message.body)
+    } else {
+        format!("[{room}{nick}] {}", message.body)
+    }
 }
 
 fn browser_page_lines(page: BrowserPage) -> Vec<String> {
@@ -974,6 +1000,10 @@ fn conversation_rows(
 fn directory_lines(entries: Vec<DirectoryEntry>) -> Vec<DirectoryRow> {
     entries
         .into_iter()
+        // Database::directory() orders by last_seen DESC. The web frontend can
+        // cheaply render the complete collection in the browser, while a large
+        // terminal ListBox is rebuilt on every refresh and becomes sluggish.
+        .take(MAX_DIRECTORY_ROWS)
         .map(|entry| DirectoryRow {
             destination_hash: entry.destination_hash.clone(),
             title: entry
@@ -1026,6 +1056,7 @@ fn main() -> anyhow::Result<()> {
     let (command_sender, mut commands) = tokio::sync::mpsc::unbounded_channel();
     let bridge = tokio.spawn(async move {
         let mut events = service.subscribe();
+        let mut rrc_hubs = HashMap::new();
         let mut refresh = tokio::time::interval(Duration::from_secs(2));
         refresh.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
@@ -1034,8 +1065,20 @@ fn main() -> anyhow::Result<()> {
                     match event {
                         Ok(ServerEvent::RrcHubChanged(hub)) => {
                             let key = format!("rrc:{}", hub.destination_hash);
+                            rrc_hubs.insert(hub.destination_hash.clone(), hub.clone());
                             let mut update = snapshot(&service).await;
-                            update.directory_views.insert(key, rrc_hub_lines(hub));
+                            update.directory_views.insert(key, rrc_hub_lines(&service, hub));
+                            if sender.send(update).is_err() {
+                                break;
+                            }
+                        }
+                        Ok(ServerEvent::RrcMessage(message)) => {
+                            let key = format!("rrc:{}", message.hub_hash);
+                            let Some(hub) = rrc_hubs.get(&message.hub_hash).cloned() else {
+                                continue;
+                            };
+                            let mut update = snapshot(&service).await;
+                            update.directory_views.insert(key, rrc_hub_lines(&service, hub));
                             if sender.send(update).is_err() {
                                 break;
                             }
@@ -1087,7 +1130,7 @@ fn main() -> anyhow::Result<()> {
                                     Duration::from_secs(45),
                                     service.rrc_connect(&destination_hash, None),
                                 ).await {
-                                    Ok(Ok(hub)) => rrc_hub_lines(hub),
+                                    Ok(Ok(hub)) => rrc_hub_lines(&service, hub),
                                     Ok(Err(error)) => vec![format!("Connection failed: {error}")],
                                     Err(_) => vec!["Connection timed out after 45 seconds".into()],
                                 };
@@ -1454,6 +1497,27 @@ mod tests {
     }
 
     #[test]
+    fn directory_is_limited_to_recent_terminal_rows() {
+        let entries = (0..MAX_DIRECTORY_ROWS + 25)
+            .map(|index| DirectoryEntry {
+                destination_hash: format!("{index:032x}"),
+                identity_hash: None,
+                delivery_hash: None,
+                kind: "node".into(),
+                display_name: Some(format!("Node {index}")),
+                hops: 1,
+                last_seen: (MAX_DIRECTORY_ROWS + 25 - index) as i64,
+                active: true,
+            })
+            .collect();
+
+        let rows = directory_lines(entries);
+        assert_eq!(rows.len(), MAX_DIRECTORY_ROWS);
+        assert_eq!(rows.first().unwrap().title, "Node 0");
+        assert_eq!(rows.last().unwrap().title, "Node 199");
+    }
+
+    #[test]
     fn messages_are_rendered_as_single_directional_lines() {
         assert_eq!(
             message_line(true, "delivered", "hello\nfrom   TUI"),
@@ -1462,6 +1526,22 @@ mod tests {
         assert_eq!(message_line(true, "retrying", "hello"), "[~] hello");
         assert_eq!(message_line(true, "failed", "hello"), "[!] hello");
         assert_eq!(message_line(false, "delivered", "reply"), "[<] reply");
+    }
+
+    #[test]
+    fn rrc_messages_include_room_and_nick() {
+        assert_eq!(
+            rrc_message_line(RrcMessageView {
+                hub_hash: "0011".into(),
+                room: Some("general".into()),
+                source_hash: "aabb".into(),
+                nick: Some("Alice".into()),
+                body: "waves".into(),
+                timestamp_ms: 0,
+                kind: "action".into(),
+            }),
+            "[#general * Alice] waves"
+        );
     }
 
     #[test]
