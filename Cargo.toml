@@ -23,6 +23,10 @@ reticulum-client = [
 name = "nomadnet-rs"
 path = "src/main.rs"
 
+[lib]
+name = "rsnomadnet_core"
+path = "src/lib.rs"
+
 [dependencies]
 anyhow = "1"
 axum = { version = "0.8", features = ["ws", "json"] }

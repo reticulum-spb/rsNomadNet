@@ -1,17 +1,7 @@
-mod api;
-mod app;
-mod browser;
-mod config;
-mod db;
-mod models;
-mod network;
-mod rrc;
-
-use std::sync::Arc;
-
 use anyhow::Context;
 use clap::Parser;
-use config::Cli;
+use rsnomadnet_core::config::{AppConfig, Cli};
+use rsnomadnet_core::{Runtime, api};
 use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
@@ -24,21 +14,10 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let cli = Cli::parse();
-    let config = config::AppConfig::from_cli(cli)?;
-    let database =
-        db::Database::open(&config.database_path).context("could not open application database")?;
-    config::restrict_file_permissions(&config.database_path)?;
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
-        .min(i64::MAX as u64) as i64;
-    database
-        .maintain(now)
-        .context("could not maintain application database")?;
-    let state = Arc::new(app::AppState::new(config.clone(), database));
+    let config = AppConfig::from_cli(cli)?;
+    let runtime = Runtime::start(config.clone())?;
+    let state = runtime.state();
 
-    let network_task = network::spawn(state.clone());
     let listener = tokio::net::TcpListener::bind(config.listen)
         .await
         .with_context(|| format!("could not bind web interface to {}", config.listen))?;
@@ -48,10 +27,7 @@ async fn main() -> anyhow::Result<()> {
         axum::serve(listener, api::router(state.clone())).with_graceful_shutdown(shutdown_signal());
     let result = server.await.context("web server failed");
 
-    state.shutdown.trigger();
-    if let Some(task) = network_task {
-        let _ = task.await;
-    }
+    runtime.shutdown().await;
     result
 }
 
