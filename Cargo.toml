@@ -7,7 +7,8 @@ license = "AGPL-3.0-or-later"
 description = "A web client compatible with NomadNet"
 
 [features]
-default = ["reticulum-full"]
+default = ["reticulum-full", "web"]
+web = ["dep:axum", "dep:tower-http"]
 reticulum-full = [
     "lxmf-core/reticulum-full",
     "rns-runtime/full",
@@ -21,7 +22,8 @@ reticulum-client = [
 
 [[bin]]
 name = "nomadnet-rs"
-path = "src/main.rs"
+path = "src/bin/web.rs"
+required-features = ["web"]
 
 [lib]
 name = "rsnomadnet_core"
@@ -29,7 +31,7 @@ path = "src/lib.rs"
 
 [dependencies]
 anyhow = "1"
-axum = { version = "0.8", features = ["ws", "json"] }
+axum = { version = "0.8", features = ["ws", "json"], optional = true }
 bytes = "1"
 clap = { version = "4", features = ["derive"] }
 futures-util = "0.3"
@@ -48,7 +50,7 @@ rs-rrc-client = { path = "../rsRRC-client", default-features = false }
 serde_json = "1"
 thiserror = "2"
 tokio = { version = "1", features = ["full"] }
-tower-http = { version = "0.6", features = ["trace"] }
+tower-http = { version = "0.6", features = ["trace"], optional = true }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 

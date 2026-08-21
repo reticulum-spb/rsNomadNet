@@ -85,6 +85,22 @@ The current development slice provides:
   and RRC;
 - a versioned HTTP API and WebSocket event stream.
 
+## Frontend architecture
+
+The Reticulum, LXMF, RRC, persistence, and Micron parsing code is exposed by
+the `rsnomadnet_core` library. Frontends use `service::AppService` for
+application operations and subscribe to typed `ServerEvent` updates instead of
+accessing SQLite or runtime command channels directly.
+
+The existing web frontend is an adapter built with the `web` Cargo feature and
+the `nomadnet-rs` binary in `src/bin/web.rs`. The core can be checked without
+the HTTP stack, which is the supported foundation for an additional terminal
+frontend:
+
+```text
+cargo check --no-default-features --features reticulum-client --lib
+```
+
 The browser interface deliberately omits QR codes, BLE management, page
 hosting, and printing. Reticulum interfaces are exposed only as read-only
 statistics. The intended scope is LXMF text messaging, remote NomadNet page

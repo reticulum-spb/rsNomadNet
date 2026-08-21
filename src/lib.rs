@@ -1,3 +1,4 @@
+#[cfg(feature = "web")]
 pub mod api;
 pub mod app;
 pub mod browser;
@@ -47,6 +48,11 @@ impl Runtime {
 
     pub fn state(&self) -> Arc<AppState> {
         self.state.clone()
+    }
+
+    /// Returns the frontend-neutral application API.
+    pub fn service(&self) -> service::AppService {
+        service::AppService::new(self.state.clone())
     }
 
     pub async fn shutdown(self) {

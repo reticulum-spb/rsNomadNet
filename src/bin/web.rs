@@ -24,7 +24,7 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!(address = %config.listen, "rsNomadNet web interface ready");
 
     let server =
-        axum::serve(listener, api::router(state.clone())).with_graceful_shutdown(shutdown_signal());
+        axum::serve(listener, api::router(state)).with_graceful_shutdown(shutdown_signal());
     let result = server.await.context("web server failed");
 
     runtime.shutdown().await;
