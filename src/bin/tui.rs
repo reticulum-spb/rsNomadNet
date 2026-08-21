@@ -315,8 +315,10 @@ struct PumpView {
 
 impl PumpView {
     fn new(shared: Shared, updates: mpsc::Receiver<UiState>) -> Self {
+        let mut state = ViewState::new(Rect::new(0, 0, 0, 0));
+        state.options.pre_process = true;
         Self {
-            state: ViewState::new(Rect::new(0, 0, 0, 0)),
+            state,
             shared,
             updates,
             armed: false,
@@ -405,6 +407,9 @@ impl TuiApp {
             state.clone(),
             Pane::Conversations,
         )));
+        // Keep the update pump in the initially focused window so it receives
+        // the first event and arms its periodic timer deterministically.
+        conversations.insert_child(Box::new(PumpView::new(state.clone(), updates)));
 
         let split = top + height / 2;
         let mut network = Window::new(
@@ -418,8 +423,6 @@ impl TuiApp {
             state.clone(),
             Pane::Network,
         )));
-        network.insert_child(Box::new(PumpView::new(state.clone(), updates)));
-
         let mut directory = Window::new(
             Rect::new(middle, split, bounds.b.x - 1, bottom),
             Some("Directory".into()),
@@ -769,16 +772,33 @@ fn main() -> anyhow::Result<()> {
         Runtime::start(config)?
     };
     let service = core.service();
-    let initial = tokio.block_on(snapshot(&service));
+    let initial = tokio.block_on(async {
+        // Give the freshly spawned network task a chance to publish Starting
+        // before the first frontend snapshot is captured.
+        tokio::task::yield_now().await;
+        snapshot(&service).await
+    });
     let shared = Rc::new(RefCell::new(initial));
     let (sender, updates) = mpsc::channel();
     let (command_sender, mut commands) = tokio::sync::mpsc::unbounded_channel();
     let bridge = tokio.spawn(async move {
         let mut events = service.subscribe();
+        let mut refresh = tokio::time::interval(Duration::from_secs(2));
+        refresh.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             tokio::select! {
                 event = events.recv() => {
-                    if event.is_err() || sender.send(snapshot(&service).await).is_err() {
+                    match event {
+                        Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                            if sender.send(snapshot(&service).await).is_err() {
+                                break;
+                            }
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                    }
+                }
+                _ = refresh.tick() => {
+                    if sender.send(snapshot(&service).await).is_err() {
                         break;
                     }
                 }
