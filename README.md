@@ -101,6 +101,19 @@ frontend:
 cargo check --no-default-features --features reticulum-client --lib
 ```
 
+The initial terminal frontend uses `tvision-rs` and displays live network
+state, LXMF conversations, and the discovered destination directory. It runs
+the synchronous terminal event loop on the main thread while Reticulum remains
+on the Tokio worker runtime:
+
+```text
+cargo run --features tui --bin nomadnet-tui -- --offline
+```
+
+Use `Alt-X` to leave the terminal frontend. Omit `--offline` to start the
+configured Reticulum interfaces. Messaging, RRC interaction, and Micron page
+views will be added on top of the shared `AppService` API.
+
 The browser interface deliberately omits QR codes, BLE management, page
 hosting, and printing. Reticulum interfaces are exposed only as read-only
 statistics. The intended scope is LXMF text messaging, remote NomadNet page

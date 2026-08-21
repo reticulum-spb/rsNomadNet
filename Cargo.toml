@@ -9,6 +9,7 @@ description = "A web client compatible with NomadNet"
 [features]
 default = ["reticulum-full", "web"]
 web = ["dep:axum", "dep:tower-http"]
+tui = ["dep:tvision-rs"]
 reticulum-full = [
     "lxmf-core/reticulum-full",
     "rns-runtime/full",
@@ -24,6 +25,11 @@ reticulum-client = [
 name = "nomadnet-rs"
 path = "src/bin/web.rs"
 required-features = ["web"]
+
+[[bin]]
+name = "nomadnet-tui"
+path = "src/bin/tui.rs"
+required-features = ["tui"]
 
 [lib]
 name = "rsnomadnet_core"
@@ -53,6 +59,7 @@ tokio = { version = "1", features = ["full"] }
 tower-http = { version = "0.6", features = ["trace"], optional = true }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tvision-rs = { version = "=0.15.0", default-features = false, optional = true }
 
 [dev-dependencies]
 tempfile = "3"
