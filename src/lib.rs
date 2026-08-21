@@ -57,8 +57,15 @@ impl Runtime {
 
     pub async fn shutdown(self) {
         self.state.shutdown.trigger();
-        if let Some(task) = self.network_task {
-            let _ = task.await;
+        if let Some(mut task) = self.network_task {
+            if tokio::time::timeout(std::time::Duration::from_secs(3), &mut task)
+                .await
+                .is_err()
+            {
+                tracing::warn!("network task did not stop in time; aborting it");
+                task.abort();
+                let _ = task.await;
+            }
         }
     }
 }

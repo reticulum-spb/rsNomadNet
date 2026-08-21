@@ -64,21 +64,48 @@ pub fn spawn(state: Arc<AppState>) -> Option<tokio::task::JoinHandle<()>> {
         return None;
     }
     Some(tokio::spawn(async move {
-        if let Err(error) = run(state.clone()).await {
+        let mut retry_delay = Duration::from_secs(1);
+        loop {
+            let Err(error) = run(state.clone()).await else {
+                break;
+            };
             tracing::error!(%error, "Reticulum service stopped");
             let _ = state.database.record_operational_error(
                 "network",
                 &error.to_string(),
                 now_f64() as i64,
             );
+            if state.shutdown.is_triggered() {
+                break;
+            }
+            let startup_failed = state.network_command_rx.lock().await.is_some();
+            if !startup_failed {
+                state
+                    .set_network(NetworkSnapshot {
+                        state: NetworkState::Failed,
+                        detail: error.to_string(),
+                        destination_hash: None,
+                        interfaces: Vec::new(),
+                    })
+                    .await;
+                break;
+            }
             state
                 .set_network(NetworkSnapshot {
-                    state: NetworkState::Failed,
-                    detail: error.to_string(),
+                    state: NetworkState::Starting,
+                    detail: format!(
+                        "Reticulum startup failed: {error}; retrying in {}s",
+                        retry_delay.as_secs()
+                    ),
                     destination_hash: None,
                     interfaces: Vec::new(),
                 })
                 .await;
+            tokio::select! {
+                _ = state.shutdown.wait() => break,
+                _ = tokio::time::sleep(retry_delay) => {}
+            }
+            retry_delay = (retry_delay * 2).min(Duration::from_secs(30));
         }
     }))
 }
@@ -109,13 +136,39 @@ async fn run(state: Arc<AppState>) -> anyhow::Result<()> {
         .rns_config
         .as_ref()
         .map(|path| path.to_string_lossy().into_owned());
-    let runtime = reticulum::init(
-        config.as_deref(),
-        None,
-        state.shutdown.clone(),
-        Arc::new(AtomicBool::new(true)),
+    let runtime = tokio::time::timeout(
+        Duration::from_secs(30),
+        reticulum::init(
+            config.as_deref(),
+            None,
+            state.shutdown.clone(),
+            Arc::new(AtomicBool::new(true)),
+        ),
     )
-    .await?;
+    .await
+    .map_err(|_| anyhow::anyhow!("Reticulum startup timed out after 30 seconds"))??;
+    // From this point the Reticulum singleton is initialized, so a failure is
+    // no longer safely retryable inside this process. Taking the command
+    // receiver here lets the supervisor distinguish that case from a failed
+    // initial connection to the shared instance.
+    let mut command_rx = state
+        .network_command_rx
+        .lock()
+        .await
+        .take()
+        .ok_or_else(|| anyhow::anyhow!("network command receiver already taken"))?;
+    // The Reticulum runtime and shared-instance client are ready at this point.
+    // Cached announces and interface statistics are optional control queries
+    // that may each wait for an RPC timeout, so do not keep the UI in Starting
+    // while they are being populated.
+    state
+        .set_network(NetworkSnapshot {
+            state: NetworkState::Online,
+            detail: format!("{:?} instance", runtime.instance_mode),
+            destination_hash: Some(destination_hash.clone()),
+            interfaces: Vec::new(),
+        })
+        .await;
 
     let (delivery_tx, delivery_rx) = tokio::sync::mpsc::channel(256);
     let (packet_tx, mut packet_rx) = tokio::sync::mpsc::channel(256);
@@ -170,12 +223,6 @@ async fn run(state: Arc<AppState>) -> anyhow::Result<()> {
     let mut outbound_active = false;
     let mut background_tasks = tokio::task::JoinSet::new();
 
-    let mut command_rx = state
-        .network_command_rx
-        .lock()
-        .await
-        .take()
-        .ok_or_else(|| anyhow::anyhow!("network command receiver already taken"))?;
     let recovered = state
         .database
         .recover_interrupted_outbound(now_f64() as i64)?;

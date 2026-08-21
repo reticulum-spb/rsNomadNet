@@ -4,7 +4,7 @@ use tokio::sync::{Mutex, RwLock, broadcast, mpsc};
 
 use crate::config::AppConfig;
 use crate::db::Database;
-use crate::models::{NetworkSnapshot, ServerEvent};
+use crate::models::{NetworkSnapshot, NetworkState, ServerEvent};
 use crate::network::NetworkCommand;
 use crate::rrc::RrcCommand;
 use rns_runtime::lifecycle::ShutdownSignal;
@@ -26,10 +26,20 @@ impl AppState {
         let (events, _) = broadcast::channel(256);
         let (network_commands, network_command_rx) = mpsc::channel(64);
         let (rrc_commands, rrc_command_rx) = mpsc::channel(64);
+        let network = if config.offline {
+            NetworkSnapshot::offline()
+        } else {
+            NetworkSnapshot {
+                state: NetworkState::Starting,
+                detail: "Waiting for Reticulum startup".into(),
+                destination_hash: None,
+                interfaces: Vec::new(),
+            }
+        };
         Self {
             config,
             database,
-            network: RwLock::new(NetworkSnapshot::offline()),
+            network: RwLock::new(network),
             events,
             network_commands,
             network_command_rx: Mutex::new(Some(network_command_rx)),
