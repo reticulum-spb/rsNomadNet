@@ -2,7 +2,6 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::rc::Rc;
-use std::sync::mpsc;
 use std::time::Duration;
 
 use clap::Parser;
@@ -21,9 +20,19 @@ use tv::{
 };
 use tvision_rs as tv;
 
+#[path = "tui/updates.rs"]
+mod updates;
+use updates::{UpdateReceiver, UpdateSender, update_channel};
+#[path = "tui/bridge.rs"]
+mod bridge;
+#[path = "tui/windows.rs"]
+mod windows;
+use windows::{ManagedWindow, WindowRegistry};
+
 const REFRESH: Command = Command::custom("rsnomadnet.refresh");
 const OPEN_CONVERSATION: Command = Command::custom("rsnomadnet.open_conversation");
 const SEND_MESSAGE: Command = Command::custom("rsnomadnet.send_message");
+const LOAD_OLDER: Command = Command::custom("rsnomadnet.load_older");
 const OPEN_RRC_HUB: Command = Command::custom("rsnomadnet.open_rrc_hub");
 const OPEN_NODE_BROWSER: Command = Command::custom("rsnomadnet.open_node_browser");
 const MAX_DIRECTORY_ROWS: usize = 200;
@@ -39,15 +48,27 @@ struct TuiCli {
     state_dir: Option<PathBuf>,
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct UiState {
     network: Vec<String>,
     conversations: Vec<ConversationRow>,
     directory: Vec<DirectoryRow>,
     directory_views: HashMap<String, Vec<String>>,
     selected_destination_hash: Option<String>,
+    send_results: HashMap<String, SendResult>,
+    pending_sends: HashMap<String, String>,
+    send_errors: HashMap<String, String>,
+    drafts: HashMap<String, String>,
+    selected_directory_hash: Option<String>,
 }
 
+#[derive(Clone)]
+struct SendResult {
+    content: String,
+    error: Option<String>,
+}
+
+#[derive(Clone)]
 struct ConversationRow {
     destination_hash: String,
     title: String,
@@ -80,6 +101,15 @@ enum UiCommand {
         destination_hash: String,
     },
     FetchNodePage {
+        destination_hash: String,
+    },
+    OpenConversation {
+        destination_hash: String,
+    },
+    CloseConversation {
+        destination_hash: String,
+    },
+    LoadOlder {
         destination_hash: String,
     },
 }
@@ -162,14 +192,21 @@ impl ConversationHistory {
     }
 
     fn lines(&self) -> Vec<String> {
-        self.state
-            .borrow()
+        let state = self.state.borrow();
+        let mut lines = state
             .conversations
             .iter()
             .find(|conversation| conversation.destination_hash == self.destination_hash)
             .map(|conversation| conversation.messages.clone())
             .filter(|messages| !messages.is_empty())
-            .unwrap_or_else(|| vec!["No messages".into()])
+            .unwrap_or_else(|| vec!["No messages".into()]);
+        if let Some(error) = state.send_errors.get(&self.destination_hash) {
+            lines.push(format!("[!] {error}"));
+        }
+        if state.pending_sends.contains_key(&self.destination_hash) {
+            lines.push("[~] Waiting for message to be saved…".into());
+        }
+        lines
     }
 }
 
@@ -180,20 +217,33 @@ impl View for ConversationHistory {
     }
 
     fn handle_event(&mut self, event: &mut Event, context: &mut Context) {
-        let refresh = matches!(
-            event,
-            Event::Broadcast { command, .. } if *command == REFRESH
-        );
+        if matches!(event, Event::KeyDown(key) if key.key == Key::PageUp)
+            && self.list.value() == Some(FieldValue::Int(0))
+        {
+            context.put_event(Event::Command(LOAD_OLDER));
+            event.clear();
+        }
         let lines = self.lines();
-        if !self.seeded || refresh || self.list.list() != lines {
+        if !self.seeded || self.list.list() != lines {
+            let mut selected = self.list.value();
+            let follow = !self.seeded
+                || matches!(selected, Some(FieldValue::Int(index))
+                if index as usize >= self.list.list().len().saturating_sub(1));
+            if lines.len() > self.list.list().len() && lines.ends_with(self.list.list()) {
+                if let Some(FieldValue::Int(index)) = &mut selected {
+                    *index += (lines.len() - self.list.list().len()) as i32;
+                }
+            }
             self.seeded = true;
             self.list.new_list(lines.clone(), context);
             tv::widgets::list_viewer::update_steps(&self.list, context);
-            if !lines.is_empty() {
+            if follow && !lines.is_empty() {
                 self.list.set_value_ctx(
                     FieldValue::Int(lines.len().saturating_sub(1) as i32),
                     context,
                 );
+            } else if let Some(selected) = selected {
+                self.list.set_value_ctx(selected, context);
             }
         }
         self.list.handle_event(event, context);
@@ -205,6 +255,16 @@ struct ConversationWindow {
     destination_hash: String,
     content: SharedText,
     active_composer: ActiveComposer,
+    shared: Shared,
+}
+
+impl Drop for ConversationWindow {
+    fn drop(&mut self) {
+        self.shared
+            .borrow_mut()
+            .drafts
+            .insert(self.destination_hash.clone(), self.content.borrow().clone());
+    }
 }
 
 #[delegate(to = window)]
@@ -214,6 +274,16 @@ impl View for ConversationWindow {
     }
 
     fn handle_event(&mut self, event: &mut Event, context: &mut Context) {
+        if let Some(result) = self
+            .shared
+            .borrow_mut()
+            .send_results
+            .remove(&self.destination_hash)
+        {
+            if result.error.is_none() && self.content.borrow().trim() == result.content {
+                self.content.borrow_mut().clear();
+            }
+        }
         if self.window.state().state.focused {
             *self.active_composer.borrow_mut() =
                 Some((self.destination_hash.clone(), self.content.clone()));
@@ -227,6 +297,7 @@ struct StateList {
     state: Shared,
     pane: Pane,
     seeded: bool,
+    row_ids: Vec<String>,
 }
 
 impl StateList {
@@ -236,6 +307,7 @@ impl StateList {
             state,
             pane,
             seeded: false,
+            row_ids: Vec::new(),
         }
     }
 
@@ -260,35 +332,24 @@ impl StateList {
         let FieldValue::Int(index) = self.list.value()? else {
             return None;
         };
-        let state = self.state.borrow();
-        match self.pane {
-            Pane::Conversations => state
-                .conversations
-                .get(index as usize)
-                .map(|conversation| conversation.destination_hash.clone()),
-            Pane::Directory => state
-                .directory
-                .get(index as usize)
-                .map(|entry| entry.destination_hash.clone()),
-            Pane::Network => None,
-        }
+        self.row_ids.get(index as usize).cloned()
     }
 
-    fn selected_index(&self) -> Option<i32> {
+    fn ids(&self) -> Vec<String> {
         let state = self.state.borrow();
-        let selected = state.selected_destination_hash.as_deref()?;
         match self.pane {
             Pane::Conversations => state
                 .conversations
                 .iter()
-                .position(|row| row.destination_hash == selected),
+                .map(|row| row.destination_hash.clone())
+                .collect(),
             Pane::Directory => state
                 .directory
                 .iter()
-                .position(|row| row.destination_hash == selected),
-            Pane::Network => None,
+                .map(|row| row.destination_hash.clone())
+                .collect(),
+            Pane::Network => Vec::new(),
         }
-        .map(|index| index as i32)
     }
 
     fn focused_directory_kind(&self) -> Option<DirectoryKind> {
@@ -318,11 +379,21 @@ impl View for StateList {
         );
         if !self.seeded || refresh {
             let lines = self.lines();
-            if !self.seeded || self.list.list() != lines {
+            let ids = self.ids();
+            if !self.seeded || self.list.list() != lines || self.row_ids != ids {
+                let selected = self.focused_destination();
+                let old_index = self.list.value();
+                let index = selected
+                    .as_ref()
+                    .and_then(|id| ids.iter().position(|item| item == id));
                 self.seeded = true;
+                self.row_ids = ids;
                 self.list.new_list(lines, context);
-                if let Some(index) = self.selected_index() {
-                    self.list.set_value_ctx(FieldValue::Int(index), context);
+                if let Some(index) = index {
+                    self.list
+                        .set_value_ctx(FieldValue::Int(index as i32), context);
+                } else if let Some(index) = old_index {
+                    self.list.set_value_ctx(index, context);
                 }
             }
         }
@@ -333,7 +404,10 @@ impl View for StateList {
             && self.list.state().state.focused
             && let Some(destination_hash) = self.focused_destination()
         {
-            self.state.borrow_mut().selected_destination_hash = Some(destination_hash);
+            self.state.borrow_mut().selected_destination_hash = Some(destination_hash.clone());
+            if matches!(self.pane, Pane::Directory) {
+                self.state.borrow_mut().selected_directory_hash = Some(destination_hash);
+            }
         }
         if open && self.state.borrow().selected_destination_hash.is_some() {
             let command = match self.pane {
@@ -357,12 +431,12 @@ impl View for StateList {
 struct PumpView {
     state: ViewState,
     shared: Shared,
-    updates: mpsc::Receiver<UiState>,
+    updates: UpdateReceiver,
     armed: bool,
 }
 
 impl PumpView {
-    fn new(shared: Shared, updates: mpsc::Receiver<UiState>) -> Self {
+    fn new(shared: Shared, updates: UpdateReceiver) -> Self {
         let mut state = ViewState::new(Rect::new(0, 0, 0, 0));
         state.options.pre_process = true;
         Self {
@@ -374,17 +448,8 @@ impl PumpView {
     }
 }
 
-fn drain_updates(updates: &mpsc::Receiver<UiState>) -> Option<UiState> {
-    let mut latest = None;
-    let mut directory_views = HashMap::new();
-    while let Ok(mut update) = updates.try_recv() {
-        directory_views.extend(std::mem::take(&mut update.directory_views));
-        latest = Some(update);
-    }
-    latest.map(|mut update| {
-        update.directory_views = directory_views;
-        update
-    })
+fn drain_updates(updates: &UpdateReceiver) -> Option<UiState> {
+    updates.try_recv().ok()
 }
 
 impl View for PumpView {
@@ -410,15 +475,53 @@ impl View for PumpView {
         if !matches!(event, Event::Timer(_)) {
             return;
         }
-        if let Some(update) = drain_updates(&self.updates) {
-            let current = self.shared.borrow();
+        if let Some(mut update) = drain_updates(&self.updates) {
+            let mut current = self.shared.borrow_mut();
+            let selected_directory_hash = current.selected_directory_hash.clone();
+            if let Some(selected) = &selected_directory_hash {
+                if !update
+                    .directory
+                    .iter()
+                    .any(|row| &row.destination_hash == selected)
+                {
+                    if let Some(row) = current
+                        .directory
+                        .iter()
+                        .find(|row| &row.destination_hash == selected)
+                        .cloned()
+                    {
+                        update.directory.truncate(MAX_DIRECTORY_ROWS - 1);
+                        update.directory.push(row);
+                    }
+                }
+            }
+            for (destination, result) in &update.send_results {
+                current.pending_sends.remove(destination);
+                if let Some(error) = &result.error {
+                    current
+                        .send_errors
+                        .insert(destination.clone(), error.clone());
+                } else {
+                    current.send_errors.remove(destination);
+                }
+            }
             let selected = current.selected_destination_hash.clone();
             let mut directory_views = current.directory_views.clone();
             directory_views.extend(update.directory_views);
+            let mut send_results = current.send_results.clone();
+            send_results.extend(update.send_results);
+            let pending_sends = current.pending_sends.clone();
+            let send_errors = current.send_errors.clone();
+            let drafts = current.drafts.clone();
             drop(current);
             *self.shared.borrow_mut() = UiState {
                 selected_destination_hash: selected,
                 directory_views,
+                send_results,
+                pending_sends,
+                send_errors,
+                drafts,
+                selected_directory_hash,
                 ..update
             };
             context.broadcast(REFRESH, None);
@@ -431,7 +534,7 @@ struct TuiApp {
 }
 
 impl TuiApp {
-    fn new(backend: Box<dyn Backend>, state: Shared, updates: mpsc::Receiver<UiState>) -> Self {
+    fn new(backend: Box<dyn Backend>, state: Shared, updates: UpdateReceiver) -> Self {
         let program = Program::new(
             backend,
             Box::new(SystemClock::new()),
@@ -443,11 +546,7 @@ impl TuiApp {
         Self { program }
     }
 
-    fn desktop(
-        mut bounds: Rect,
-        state: Shared,
-        updates: mpsc::Receiver<UiState>,
-    ) -> Option<Box<dyn View>> {
+    fn desktop(mut bounds: Rect, state: Shared, updates: UpdateReceiver) -> Option<Box<dyn View>> {
         bounds.a.y += 1;
         bounds.b.y -= 1;
         let mut desktop = Desktop::new(bounds, |rect| Some(Desktop::init_background(rect)));
@@ -528,17 +627,36 @@ impl TuiApp {
         commands: tokio::sync::mpsc::UnboundedSender<UiCommand>,
     ) -> Command {
         let active_composer: ActiveComposer = Rc::new(RefCell::new(None));
+        let windows = Rc::new(RefCell::new(WindowRegistry::default()));
         self.program.run_app(move |program, command| {
-            if command == SEND_MESSAGE {
+            if command == LOAD_OLDER {
+                if let Some((destination_hash, _)) = active_composer.borrow().as_ref() {
+                    let _ = commands.send(UiCommand::LoadOlder {
+                        destination_hash: destination_hash.clone(),
+                    });
+                }
+            } else if command == SEND_MESSAGE {
                 let active = active_composer.borrow().clone();
                 if let Some((destination_hash, content)) = active {
                     let message = content.borrow().trim().to_owned();
-                    if !message.is_empty() {
-                        let _ = commands.send(UiCommand::SendMessage {
+                    if !message.is_empty()
+                        && !state.borrow().pending_sends.contains_key(&destination_hash)
+                    {
+                        let sent = commands.send(UiCommand::SendMessage {
                             destination_hash: destination_hash.clone(),
                             content: message.clone(),
                         });
-                        content.borrow_mut().clear();
+                        if sent.is_ok() {
+                            state
+                                .borrow_mut()
+                                .pending_sends
+                                .insert(destination_hash, message);
+                        } else {
+                            state
+                                .borrow_mut()
+                                .send_errors
+                                .insert(destination_hash, "Application worker stopped".into());
+                        }
                     }
                 }
             } else if command == OPEN_CONVERSATION {
@@ -550,11 +668,23 @@ impl TuiApp {
                     return;
                 };
                 let bounds = program.desktop_rect();
-                program.desktop_insert(Box::new(conversation_window(
-                    bounds,
-                    state.clone(),
-                    destination_hash,
-                    active_composer.clone(),
+                let key = format!("lxmf:{destination_hash}");
+                if windows.borrow_mut().focus_existing(&key) {
+                    return;
+                }
+                let _ = commands.send(UiCommand::OpenConversation {
+                    destination_hash: destination_hash.clone(),
+                });
+                program.desktop_insert(Box::new(ManagedWindow::new(
+                    Box::new(conversation_window(
+                        bounds,
+                        state.clone(),
+                        destination_hash,
+                        active_composer.clone(),
+                    )),
+                    key,
+                    windows.clone(),
+                    commands.clone(),
                 )));
             } else if matches!(command, OPEN_RRC_HUB | OPEN_NODE_BROWSER) {
                 let Some(destination_hash) = selected_destination(&state.borrow()) else {
@@ -578,16 +708,24 @@ impl TuiApp {
                         },
                     )
                 };
+                if windows.borrow_mut().focus_existing(&key) {
+                    return;
+                }
                 state
                     .borrow_mut()
                     .directory_views
                     .insert(key.clone(), vec!["Loading…".into()]);
-                program.desktop_insert(Box::new(directory_target_window(
-                    bounds,
-                    state.clone(),
-                    &destination_hash,
-                    title,
+                program.desktop_insert(Box::new(ManagedWindow::new(
+                    Box::new(directory_target_window(
+                        bounds,
+                        state.clone(),
+                        &destination_hash,
+                        title,
+                        key.clone(),
+                    )),
                     key,
+                    windows.clone(),
+                    commands.clone(),
                 )));
                 let _ = commands.send(ui_command);
             }
@@ -670,8 +808,15 @@ impl View for DirectoryTargetView {
             Event::Broadcast { command, .. } if *command == REFRESH
         );
         if !self.seeded || refresh {
-            self.seeded = true;
-            self.list.new_list(self.lines(), context);
+            let lines = self.lines();
+            if !self.seeded || self.list.list() != lines {
+                let selected = self.list.value();
+                self.seeded = true;
+                self.list.new_list(lines, context);
+                if let Some(selected) = selected {
+                    self.list.set_value_ctx(selected, context);
+                }
+            }
         }
         self.list.handle_event(event, context);
     }
@@ -757,7 +902,14 @@ fn conversation_window(
         zoom: true,
     });
     let extent = window.state().get_extent();
-    let content = Rc::new(RefCell::new(String::new()));
+    let content = Rc::new(RefCell::new(
+        state
+            .borrow()
+            .drafts
+            .get(&destination_hash)
+            .cloned()
+            .unwrap_or_default(),
+    ));
     *active_composer.borrow_mut() = Some((destination_hash.clone(), content.clone()));
     let mut history_scroll =
         ScrollBar::new(Rect::new(extent.b.x - 2, 1, extent.b.x - 1, extent.b.y - 2));
@@ -797,6 +949,7 @@ fn conversation_window(
         destination_hash,
         content,
         active_composer,
+        shared: state,
     }
 }
 
@@ -814,30 +967,6 @@ fn message_line(outbound: bool, state: &str, content: &str) -> String {
     format!("[{marker}] {content}")
 }
 
-fn append_send_error(state: &mut UiState, destination_hash: &str, error: &str) {
-    let message = format!("[!] Send failed: {error}");
-    if let Some(conversation) = state
-        .conversations
-        .iter_mut()
-        .find(|conversation| conversation.destination_hash == destination_hash)
-    {
-        conversation.messages.push(message);
-        return;
-    }
-    let title = state
-        .directory
-        .iter()
-        .find(|entry| entry.destination_hash == destination_hash)
-        .map(|entry| entry.title.clone())
-        .unwrap_or_else(|| destination_hash.to_owned());
-    state.conversations.push(ConversationRow {
-        destination_hash: destination_hash.to_owned(),
-        title: title.clone(),
-        label: title,
-        messages: vec![message],
-    });
-}
-
 async fn snapshot(service: &AppService) -> UiState {
     let network = service.network_snapshot().await;
     let conversations = service.conversations().unwrap_or_default();
@@ -848,6 +977,7 @@ async fn snapshot(service: &AppService) -> UiState {
         directory: directory_lines(directory),
         directory_views: HashMap::new(),
         selected_destination_hash: None,
+        ..UiState::default()
     }
 }
 
@@ -960,18 +1090,13 @@ fn network_lines(network: NetworkSnapshot) -> Vec<String> {
 }
 
 fn conversation_rows(
-    service: &AppService,
+    _service: &AppService,
     conversations: Vec<ConversationSummary>,
 ) -> Vec<ConversationRow> {
     conversations
         .into_iter()
         .map(|conversation| {
-            let messages = service
-                .messages(&conversation.destination_hash, None)
-                .unwrap_or_default()
-                .into_iter()
-                .map(|message| message_line(message.outbound, &message.state, &message.content))
-                .collect();
+            let messages = Vec::new();
             ConversationRow {
                 destination_hash: conversation.destination_hash.clone(),
                 title: conversation
@@ -1045,133 +1170,29 @@ fn main() -> anyhow::Result<()> {
         Runtime::start(config)?
     };
     let service = core.service();
+    // Subscribe before reading the initial snapshot so startup events cannot
+    // fall into a gap between the database read and starting the bridge.
+    let events = service.subscribe();
     let initial = tokio.block_on(async {
         // Give the freshly spawned network task a chance to publish Starting
         // before the first frontend snapshot is captured.
         tokio::task::yield_now().await;
         snapshot(&service).await
     });
-    let shared = Rc::new(RefCell::new(initial));
-    let (sender, updates) = mpsc::channel();
-    let (command_sender, mut commands) = tokio::sync::mpsc::unbounded_channel();
-    let bridge = tokio.spawn(async move {
-        let mut events = service.subscribe();
-        let mut rrc_hubs = HashMap::new();
-        let mut refresh = tokio::time::interval(Duration::from_secs(2));
-        refresh.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        loop {
-            tokio::select! {
-                event = events.recv() => {
-                    match event {
-                        Ok(ServerEvent::RrcHubChanged(hub)) => {
-                            let key = format!("rrc:{}", hub.destination_hash);
-                            rrc_hubs.insert(hub.destination_hash.clone(), hub.clone());
-                            let mut update = snapshot(&service).await;
-                            update.directory_views.insert(key, rrc_hub_lines(&service, hub));
-                            if sender.send(update).is_err() {
-                                break;
-                            }
-                        }
-                        Ok(ServerEvent::RrcMessage(message)) => {
-                            let key = format!("rrc:{}", message.hub_hash);
-                            let Some(hub) = rrc_hubs.get(&message.hub_hash).cloned() else {
-                                continue;
-                            };
-                            let mut update = snapshot(&service).await;
-                            update.directory_views.insert(key, rrc_hub_lines(&service, hub));
-                            if sender.send(update).is_err() {
-                                break;
-                            }
-                        }
-                        Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                            if sender.send(snapshot(&service).await).is_err() {
-                                break;
-                            }
-                        }
-                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-                    }
-                }
-                _ = refresh.tick() => {
-                    if sender.send(snapshot(&service).await).is_err() {
-                        break;
-                    }
-                }
-                command = commands.recv() => {
-                    let Some(command) = command else { break };
-                    match command {
-                        UiCommand::SendMessage { destination_hash, content } => {
-                            let failed_destination = destination_hash.clone();
-                            let result = service.send_message(SendMessage {
-                                destination_hash,
-                                title: String::new(),
-                                content,
-                                delivery_method: "automatic".into(),
-                                propagation_node: None,
-                            }).await;
-                            let mut update = snapshot(&service).await;
-                            match result {
-                                Ok(_) => update.network.push("Message queued for delivery".into()),
-                                Err(error) => {
-                                    let error = error.to_string();
-                                    update.network.push(format!("Send failed: {error}"));
-                                    append_send_error(&mut update, &failed_destination, &error);
-                                }
-                            }
-                            if sender.send(update).is_err() {
-                                break;
-                            }
-                        }
-                        UiCommand::ConnectRrc { destination_hash } => {
-                            let service = service.clone();
-                            let sender = sender.clone();
-                            tokio::spawn(async move {
-                                let key = format!("rrc:{destination_hash}");
-                                let lines = match tokio::time::timeout(
-                                    Duration::from_secs(45),
-                                    service.rrc_connect(&destination_hash, None),
-                                ).await {
-                                    Ok(Ok(hub)) => rrc_hub_lines(&service, hub),
-                                    Ok(Err(error)) => vec![format!("Connection failed: {error}")],
-                                    Err(_) => vec!["Connection timed out after 45 seconds".into()],
-                                };
-                                let mut update = snapshot(&service).await;
-                                update.directory_views.insert(key, lines);
-                                let _ = sender.send(update);
-                            });
-                        }
-                        UiCommand::FetchNodePage { destination_hash } => {
-                            let service = service.clone();
-                            let sender = sender.clone();
-                            tokio::spawn(async move {
-                                let key = format!("node:{destination_hash}");
-                                let lines = match tokio::time::timeout(
-                                    Duration::from_secs(45),
-                                    service.fetch_page(FetchPage {
-                                        url: node_index_url(&destination_hash),
-                                        reload: false,
-                                        fields: BTreeMap::new(),
-                                    }),
-                                ).await {
-                                    Ok(Ok(page)) => browser_page_lines(page),
-                                    Ok(Err(error)) => vec![format!("Page load failed: {error}")],
-                                    Err(_) => vec!["Page load timed out after 45 seconds".into()],
-                                };
-                                let mut update = snapshot(&service).await;
-                                update.directory_views.insert(key, lines);
-                                let _ = sender.send(update);
-                            });
-                        }
-                    }
-                }
-            }
-        }
-    });
+    let shared = Rc::new(RefCell::new(initial.clone()));
+    let (sender, updates) = update_channel();
+    let (command_sender, commands) = tokio::sync::mpsc::unbounded_channel();
+    let bridge = tokio.spawn(bridge::run(service, initial, sender, commands, events));
 
     let mut app = TuiApp::new(Box::new(CrosstermBackend::new()?), shared.clone(), updates);
     let _ = app.run(shared, command_sender);
 
-    bridge.abort();
-    tokio.block_on(core.shutdown());
+    drop(app);
+    tokio.block_on(async {
+        bridge.abort();
+        let _ = bridge.await;
+        core.shutdown().await;
+    });
     Ok(())
 }
 
@@ -1179,6 +1200,229 @@ fn main() -> anyhow::Result<()> {
 mod tests {
     use super::*;
     use tv::HeadlessBackend;
+
+    fn with_context(run: impl FnOnce(&mut Context)) {
+        let mut events = std::collections::VecDeque::new();
+        let mut timers = tv::TimerQueue::new();
+        let mut deferred = Vec::new();
+        let mut context = Context::new(&mut events, &mut timers, 0, &mut deferred);
+        run(&mut context);
+    }
+
+    #[test]
+    fn periodic_refresh_does_not_move_history_selection() {
+        let state = Rc::new(RefCell::new(UiState::default()));
+        state
+            .borrow_mut()
+            .directory_views
+            .insert("node:aa".into(), (0..60).map(|n| n.to_string()).collect());
+        let mut page = DirectoryTargetView::new(Rect::new(0, 0, 40, 8), state, "node:aa".into());
+        with_context(|ctx| {
+            page.handle_event(
+                &mut Event::Broadcast {
+                    command: REFRESH,
+                    source: None,
+                },
+                ctx,
+            );
+            page.list.set_value_ctx(FieldValue::Int(30), ctx);
+            page.handle_event(
+                &mut Event::Broadcast {
+                    command: REFRESH,
+                    source: None,
+                },
+                ctx,
+            );
+            assert_eq!(page.list.value(), Some(FieldValue::Int(30)));
+        });
+    }
+
+    #[test]
+    fn lxmf_keeps_reading_position_and_only_follows_at_the_end() {
+        let state = Rc::new(RefCell::new(UiState {
+            conversations: vec![ConversationRow {
+                destination_hash: "aa".into(),
+                title: "Alice".into(),
+                label: "Alice".into(),
+                messages: (0..50).map(|n| format!("Message {n}")).collect(),
+            }],
+            ..UiState::default()
+        }));
+        let mut window = Dialog::new(Rect::new(0, 0, 40, 12), None);
+        let scroll = window.insert_child(Box::new(ScrollBar::new(Rect::new(38, 1, 39, 10))));
+        let mut history =
+            ConversationHistory::new(Rect::new(1, 1, 38, 10), state.clone(), "aa".into(), scroll);
+        with_context(|ctx| {
+            let mut refresh = Event::Broadcast {
+                command: REFRESH,
+                source: None,
+            };
+            history.handle_event(&mut refresh, ctx);
+            assert_eq!(history.list.value(), Some(FieldValue::Int(49)));
+            history.list.set_value_ctx(FieldValue::Int(10), ctx);
+            history.handle_event(&mut refresh, ctx);
+            assert_eq!(history.list.value(), Some(FieldValue::Int(10)));
+            state.borrow_mut().conversations[0]
+                .messages
+                .push("New message".into());
+            history.handle_event(&mut refresh, ctx);
+            assert_eq!(history.list.value(), Some(FieldValue::Int(10)));
+            history.list.set_value_ctx(FieldValue::Int(50), ctx);
+            state.borrow_mut().conversations[0]
+                .messages
+                .push("Another new message".into());
+            history.handle_event(&mut refresh, ctx);
+            assert_eq!(history.list.value(), Some(FieldValue::Int(51)));
+            history.list.set_value_ctx(FieldValue::Int(0), ctx);
+            state.borrow_mut().conversations[0]
+                .messages
+                .insert(0, "Older message".into());
+            history.handle_event(&mut refresh, ctx);
+            assert_eq!(history.list.value(), Some(FieldValue::Int(1)));
+        });
+    }
+
+    #[test]
+    fn directory_tracks_identity_when_equal_labels_are_reordered() {
+        let state = Rc::new(RefCell::new(UiState {
+            directory: vec!["aa", "bb"]
+                .into_iter()
+                .map(|id| DirectoryRow {
+                    destination_hash: id.into(),
+                    title: "Same name".into(),
+                    label: "Same name".into(),
+                    kind: DirectoryKind::Peer,
+                })
+                .collect(),
+            ..UiState::default()
+        }));
+        let mut list = StateList::new(Rect::new(0, 0, 40, 8), state.clone(), Pane::Directory);
+        with_context(|ctx| {
+            list.handle_event(
+                &mut Event::Broadcast {
+                    command: REFRESH,
+                    source: None,
+                },
+                ctx,
+            );
+            list.list.set_value_ctx(FieldValue::Int(1), ctx);
+            state.borrow_mut().directory.reverse();
+            list.handle_event(
+                &mut Event::Broadcast {
+                    command: REFRESH,
+                    source: None,
+                },
+                ctx,
+            );
+            assert_eq!(list.focused_destination().as_deref(), Some("bb"));
+            assert_eq!(list.list.value(), Some(FieldValue::Int(0)));
+        });
+    }
+
+    #[test]
+    fn send_acknowledgement_keeps_failed_or_newly_edited_text() {
+        let state = Rc::new(RefCell::new(UiState::default()));
+        let mut window = conversation_window(
+            Rect::new(0, 0, 100, 30),
+            state.clone(),
+            "aa".into(),
+            Rc::new(RefCell::new(None)),
+        );
+        *window.content.borrow_mut() = "draft".into();
+        with_context(|ctx| {
+            for error in [Some("offline".into()), None] {
+                state.borrow_mut().send_results.insert(
+                    "aa".into(),
+                    SendResult {
+                        content: "draft".into(),
+                        error: error.clone(),
+                    },
+                );
+                window.handle_event(
+                    &mut Event::Broadcast {
+                        command: REFRESH,
+                        source: None,
+                    },
+                    ctx,
+                );
+                assert_eq!(
+                    &*window.content.borrow(),
+                    if error.is_some() { "draft" } else { "" }
+                );
+            }
+            *window.content.borrow_mut() = "edited while sending".into();
+            state.borrow_mut().send_results.insert(
+                "aa".into(),
+                SendResult {
+                    content: "draft".into(),
+                    error: None,
+                },
+            );
+            window.handle_event(
+                &mut Event::Broadcast {
+                    command: REFRESH,
+                    source: None,
+                },
+                ctx,
+            );
+            assert_eq!(&*window.content.borrow(), "edited while sending");
+        });
+    }
+
+    #[test]
+    fn coalescing_preserves_send_failures_until_consumed() {
+        let (sender, updates) = update_channel();
+        let mut update = UiState::default();
+        update.send_results.insert(
+            "aa".into(),
+            SendResult {
+                content: "draft".into(),
+                error: Some("offline".into()),
+            },
+        );
+        sender.send(update).unwrap();
+        for _ in 0..1000 {
+            sender.send(UiState::default()).unwrap();
+        }
+        assert_eq!(
+            updates.try_recv().unwrap().send_results["aa"]
+                .error
+                .as_deref(),
+            Some("offline")
+        );
+        assert!(updates.try_recv().is_err());
+    }
+
+    #[test]
+    fn send_error_remains_visible_after_network_refresh() {
+        let state = Rc::new(RefCell::new(UiState::default()));
+        state
+            .borrow_mut()
+            .pending_sends
+            .insert("aa".into(), "draft".into());
+        let (sender, updates) = update_channel();
+        let mut pump = PumpView::new(state.clone(), updates);
+        let timer = tv::TimerQueue::new().set_timer(0, Duration::from_millis(1), None);
+        let mut update = UiState::default();
+        update.send_results.insert(
+            "aa".into(),
+            SendResult {
+                content: "draft".into(),
+                error: Some("offline".into()),
+            },
+        );
+        with_context(|ctx| {
+            sender.send(update).unwrap();
+            pump.handle_event(&mut Event::Timer(timer), ctx);
+            sender.send(UiState::default()).unwrap();
+            pump.handle_event(&mut Event::Timer(timer), ctx);
+            assert!(!state.borrow().pending_sends.contains_key("aa"));
+            assert_eq!(
+                state.borrow().send_errors.get("aa").map(String::as_str),
+                Some("offline")
+            );
+        });
+    }
 
     #[test]
     fn dashboard_constructs_and_renders() {
@@ -1199,8 +1443,9 @@ mod tests {
             }],
             directory_views: HashMap::new(),
             selected_destination_hash: None,
+            ..UiState::default()
         }));
-        let (_sender, receiver) = mpsc::channel();
+        let (_sender, receiver) = update_channel();
         let mut app = TuiApp::new(Box::new(backend), state, receiver);
 
         app.program.pump_once();
@@ -1223,7 +1468,7 @@ mod tests {
             }],
             ..UiState::default()
         }));
-        let (_update_sender, updates) = mpsc::channel();
+        let (_update_sender, updates) = update_channel();
         let (command_sender, mut commands) = tokio::sync::mpsc::unbounded_channel();
         let mut app = TuiApp::new(Box::new(backend), state.clone(), updates);
 
@@ -1260,7 +1505,7 @@ mod tests {
             }],
             ..UiState::default()
         }));
-        let (_update_sender, updates) = mpsc::channel();
+        let (_update_sender, updates) = update_channel();
         let (command_sender, mut commands) = tokio::sync::mpsc::unbounded_channel();
         let mut app = TuiApp::new(Box::new(backend), state.clone(), updates);
 
@@ -1290,7 +1535,7 @@ mod tests {
 
     #[test]
     fn queued_resource_result_survives_a_later_periodic_snapshot() {
-        let (sender, updates) = mpsc::channel();
+        let (sender, updates) = update_channel();
         let mut result = UiState::default();
         result
             .directory_views
@@ -1355,7 +1600,7 @@ mod tests {
             }],
             ..UiState::default()
         }));
-        let (_update_sender, updates) = mpsc::channel();
+        let (_update_sender, updates) = update_channel();
         let (command_sender, mut commands) = tokio::sync::mpsc::unbounded_channel();
         let mut app = TuiApp::new(Box::new(backend), state.clone(), updates);
 
@@ -1368,6 +1613,10 @@ mod tests {
         assert!(screen.snapshot().contains("LXMF Conversation — Alice"));
         assert!(state.borrow().conversations[0].messages.is_empty());
 
+        assert!(matches!(
+            commands.try_recv(),
+            Ok(UiCommand::OpenConversation { .. })
+        ));
         match commands.try_recv() {
             Ok(UiCommand::SendMessage {
                 destination_hash: actual,
@@ -1403,7 +1652,7 @@ mod tests {
             ],
             ..UiState::default()
         }));
-        let (_update_sender, updates) = mpsc::channel();
+        let (_update_sender, updates) = update_channel();
         let (command_sender, mut commands) = tokio::sync::mpsc::unbounded_channel();
         let mut app = TuiApp::new(Box::new(backend), state.clone(), updates);
 
@@ -1414,6 +1663,10 @@ mod tests {
         screen.push_event(Event::Command(Command::QUIT));
         app.run(state, command_sender);
 
+        assert!(matches!(
+            commands.try_recv(),
+            Ok(UiCommand::OpenConversation { .. })
+        ));
         match commands.try_recv() {
             Ok(UiCommand::SendMessage {
                 destination_hash,
@@ -1440,7 +1693,7 @@ mod tests {
             }],
             ..UiState::default()
         }));
-        let (_update_sender, updates) = mpsc::channel();
+        let (_update_sender, updates) = update_channel();
         let (command_sender, mut commands) = tokio::sync::mpsc::unbounded_channel();
         let mut app = TuiApp::new(Box::new(backend), state.clone(), updates);
 
@@ -1457,6 +1710,10 @@ mod tests {
         screen.push_event(Event::Command(Command::QUIT));
         app.run(state, command_sender);
 
+        assert!(matches!(
+            commands.try_recv(),
+            Ok(UiCommand::OpenConversation { .. })
+        ));
         match commands.try_recv() {
             Ok(UiCommand::SendMessage {
                 destination_hash: actual,
@@ -1468,32 +1725,6 @@ mod tests {
             Err(error) => panic!("directory peer was not used by composer: {error}"),
             Ok(_) => panic!("directory peer submitted the wrong command"),
         }
-    }
-
-    #[test]
-    fn refreshed_directory_restores_selected_peer() {
-        let selected = "00112233445566778899aabbccddeeff";
-        let state = Rc::new(RefCell::new(UiState {
-            directory: vec![
-                DirectoryRow {
-                    destination_hash: "aabbccddeeff00112233445566778899".into(),
-                    title: "Alice".into(),
-                    label: "+ lxmf.delivery Alice".into(),
-                    kind: DirectoryKind::Peer,
-                },
-                DirectoryRow {
-                    destination_hash: selected.into(),
-                    title: "Bob".into(),
-                    label: "+ lxmf.delivery Bob (updated)".into(),
-                    kind: DirectoryKind::Peer,
-                },
-            ],
-            selected_destination_hash: Some(selected.into()),
-            ..UiState::default()
-        }));
-        let list = StateList::new(Rect::new(0, 0, 40, 10), state, Pane::Directory);
-
-        assert_eq!(list.selected_index(), Some(1));
     }
 
     #[test]
@@ -1541,27 +1772,6 @@ mod tests {
                 kind: "action".into(),
             }),
             "[#general * Alice] waves"
-        );
-    }
-
-    #[test]
-    fn send_failures_are_visible_in_conversation_history() {
-        let destination = "00112233445566778899aabbccddeeff";
-        let mut state = UiState {
-            directory: vec![DirectoryRow {
-                destination_hash: destination.into(),
-                title: "Bob".into(),
-                label: "Bob".into(),
-                kind: DirectoryKind::Rrc,
-            }],
-            ..UiState::default()
-        };
-
-        append_send_error(&mut state, destination, "network unavailable");
-
-        assert_eq!(
-            state.conversations[0].messages,
-            ["[!] Send failed: network unavailable"]
         );
     }
 }

@@ -178,6 +178,19 @@ impl AppService {
             .mark_conversation_read(&destination_hash)?)
     }
 
+    /// Recent conversation history, bounded for frontends loading older pages.
+    pub fn recent_messages(
+        &self,
+        destination_hash: &str,
+        limit: usize,
+    ) -> AppResult<Vec<MessageView>> {
+        let destination_hash = canonical_hash(destination_hash, "destination hash")?;
+        Ok(self
+            .state
+            .database
+            .recent_messages(&destination_hash, limit)?)
+    }
+
     pub fn clear_conversation(&self, destination_hash: &str) -> AppResult<usize> {
         let destination_hash = canonical_hash(destination_hash, "destination hash")?;
         if self

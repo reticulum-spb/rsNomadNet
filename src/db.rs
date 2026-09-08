@@ -707,6 +707,14 @@ impl Database {
     }
 
     pub fn messages(&self, destination_hash: &str) -> anyhow::Result<Vec<MessageView>> {
+        self.recent_messages(destination_hash, 500)
+    }
+
+    pub fn recent_messages(
+        &self,
+        destination_hash: &str,
+        limit: usize,
+    ) -> anyhow::Result<Vec<MessageView>> {
         let connection = self.connection.lock().expect("database mutex poisoned");
         let mut statement = connection.prepare(
             "
@@ -715,12 +723,17 @@ impl Database {
                    attempts, last_error, message_hash
             FROM messages
             WHERE destination_hash = ?1
-            ORDER BY timestamp, id
-            LIMIT 500
+            ORDER BY timestamp DESC, id DESC
+            LIMIT ?2
             ",
         )?;
-        let rows = statement.query_map([destination_hash], map_message)?;
-        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+        let rows = statement.query_map(
+            params![destination_hash, limit.clamp(1, 10_000) as i64],
+            map_message,
+        )?;
+        let mut messages = rows.collect::<Result<Vec<_>, _>>()?;
+        messages.reverse();
+        Ok(messages)
     }
 
     pub fn mark_conversation_read(&self, destination_hash: &str) -> anyhow::Result<()> {
@@ -1365,6 +1378,37 @@ mod tests {
         assert_eq!(database.messages("aa").unwrap()[0].content, "hello");
         assert!(database.message_hash_exists("01").unwrap());
         assert!(!database.message_hash_exists("02").unwrap());
+    }
+
+    #[test]
+    fn conversation_history_keeps_latest_500_messages_in_order() {
+        let database = Database::open(Path::new(":memory:")).unwrap();
+        for timestamp in 0..505 {
+            database
+                .store_message(NewMessage {
+                    destination_hash: "aa",
+                    source_hash: "bb",
+                    title: "",
+                    content: "hello",
+                    timestamp,
+                    outbound: false,
+                    state: "delivered",
+                    delivery_method: "incoming",
+                    attempts: 0,
+                    next_attempt: 0,
+                    last_error: None,
+                    message_hash: None,
+                })
+                .unwrap();
+        }
+        let messages = database.messages("aa").unwrap();
+        assert_eq!(messages.len(), 500);
+        assert_eq!(messages.first().unwrap().timestamp, 5);
+        assert_eq!(messages.last().unwrap().timestamp, 504);
+        let older = database.recent_messages("aa", 1000).unwrap();
+        assert_eq!(older.len(), 505);
+        assert_eq!(older.first().unwrap().timestamp, 0);
+        assert_eq!(older.last().unwrap().timestamp, 504);
     }
 
     #[test]

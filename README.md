@@ -115,6 +115,11 @@ This opens one conversation window containing scrollable message history and
 the new-message field; the selected peer is shown in its title. Use `Alt-X` to
 leave the terminal frontend. Enter on an RRC hub or NomadNet node in Directory
 opens the corresponding hub or page-browser window.
+Reopening a target focuses its existing window. LXMF drafts remain in the input
+until the core confirms that the message was saved; failed sends keep the text
+and show an error in the conversation. In history, `PageUp` at the first row
+loads 500 older messages (up to 10,000 per open conversation). Directory shows
+the 200 most recent destinations and retains the selected entry during refresh.
 Omit `--offline` to start the configured Reticulum interfaces.
 
 The browser interface deliberately omits QR codes, BLE management, page
