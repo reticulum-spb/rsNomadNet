@@ -1579,6 +1579,8 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "tvision-rs",
+ "unicode-segmentation",
+ "unicode-width",
 ]
 
 [[package]]

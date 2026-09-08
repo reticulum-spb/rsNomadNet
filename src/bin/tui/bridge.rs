@@ -4,7 +4,7 @@ use std::collections::HashSet;
 enum Completion {
     Sent(String, String, Result<(), String>),
     Hub(String, u64, Result<RrcHubView, String>),
-    Page(String, Result<BrowserPage, String>),
+    Browser,
 }
 
 fn load_history(service: &AppService, state: &mut UiState, destination: &str, limit: usize) {
@@ -140,13 +140,7 @@ pub(super) async fn run(
                             state.directory_views.insert(format!("rrc:{destination}"), lines);
                         }
                     }
-                    Some(Ok(Completion::Page(destination, result))) => {
-                        in_flight.remove(&format!("node:{destination}"));
-                        state.directory_views.insert(format!("node:{destination}"), match result {
-                            Ok(page) => browser_page_lines(page),
-                            Err(error) => vec![format!("Page load failed: {error}")],
-                        });
-                    }
+                    Some(Ok(Completion::Browser)) => {}
                     Some(Err(error)) => state.network.push(format!("Background task failed: {error}")),
                     None => {}
                 }
@@ -155,6 +149,14 @@ pub(super) async fn run(
             command = commands.recv() => {
                 let Some(command) = command else { break };
                 dirty = true;
+                if let UiCommand::BrowserFetch(request) = command {
+                    if jobs.len() >= 16 { request.reject("Too many pending requests; try again shortly"); }
+                    else {
+                        let service = service.clone();
+                        jobs.spawn(async move { request.execute(service).await; Completion::Browser });
+                    }
+                    continue;
+                }
                 if let UiCommand::LoadOlder { destination_hash } = command {
                     if let Some(limit) = opened.get_mut(&destination_hash) {
                         *limit = (*limit + 500).min(10_000);
@@ -181,7 +183,7 @@ pub(super) async fn run(
                 let (key, destination) = match &command {
                     UiCommand::SendMessage { destination_hash, .. } => (format!("send:{destination_hash}"), destination_hash),
                     UiCommand::ConnectRrc { destination_hash } => (format!("rrc:{destination_hash}"), destination_hash),
-                    UiCommand::FetchNodePage { destination_hash } => (format!("node:{destination_hash}"), destination_hash),
+                    UiCommand::BrowserFetch(_) => unreachable!(),
                     UiCommand::OpenConversation { .. } | UiCommand::CloseConversation { .. } | UiCommand::LoadOlder { .. } => unreachable!(),
                 };
                 if let UiCommand::ConnectRrc { .. } = &command {
@@ -222,16 +224,7 @@ pub(super) async fn run(
                             Completion::Hub(destination_hash, version, result)
                         });
                     }
-                    UiCommand::FetchNodePage { destination_hash } => {
-                        state.directory_views.insert(key, vec!["Loading…".into()]);
-                        jobs.spawn(async move {
-                            let result = tokio::time::timeout(Duration::from_secs(190), service.fetch_page(FetchPage {
-                                url: node_index_url(&destination_hash), reload: false, fields: BTreeMap::new(),
-                            })).await.map_err(|_| "Timed out after 190 seconds".to_owned())
-                                .and_then(|result| result.map_err(|error| error.to_string()));
-                            Completion::Page(destination_hash, result)
-                        });
-                    }
+                    UiCommand::BrowserFetch(_) => unreachable!(),
                     UiCommand::OpenConversation { .. } | UiCommand::CloseConversation { .. } | UiCommand::LoadOlder { .. } => unreachable!(),
                 }
             }

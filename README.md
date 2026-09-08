@@ -101,8 +101,9 @@ frontend:
 cargo check --no-default-features --features reticulum-client --lib
 ```
 
-The initial terminal frontend uses `tvision-rs` and displays live network
-state, LXMF conversations, and the discovered destination directory. It runs
+The terminal frontend uses `tvision-rs` and provides live network information,
+LXMF conversations, a destination directory, RRC hub windows, and a Micron page
+browser. It runs
 the synchronous terminal event loop on the main thread while Reticulum remains
 on the Tokio worker runtime:
 
@@ -126,6 +127,38 @@ The Windows menu (`Alt-W`) provides Size/Move (`Ctrl-F5`), Zoom (`F5`),
 Tile, Cascade, Next (`F6`), Previous (`Shift-F6`), and Close (`Alt-F3`).
 In Size/Move mode use arrows to move, Shift-arrows to resize, Enter to accept,
 or Escape to cancel. Network is a gray information window without scrolling.
+
+The page browser has a gray window frame and a black page background by
+default (Micron page colors override the default). It renders headings,
+sections, inline colors and emphasis, aligned/wrapped text, literal blocks,
+tables, anchors, links, forms, and refreshing partials. Resizing reflows the
+page without clearing edited fields. Each browser has independent navigation
+history and cancels pending requests when navigating away or closing.
+Use `Tab` / `Shift-Tab` to select links and form controls, `Enter` to follow a
+link, and `Space` to toggle checkboxes/radio buttons. Links and controls also
+respond to mouse clicks. `Up` / `Down`, `PageUp` / `PageDown`, and the mouse wheel
+scroll the page; `Home` / `End` jump to the beginning/end.
+
+| Browser key | Action |
+| --- | --- |
+| `Left` / `Right` | Back / forward in this window's navigation history |
+| `Ctrl-R` | Reload the current page and resume automatic partial updates |
+| `Esc` | Stop loading and automatic partial updates; keep the window open |
+| `Ctrl-L` | Focus the address field; `Enter` opens the entered address |
+| `Shift-Left` / `Shift-Right` | Scroll wide literal blocks and tables horizontally |
+| `Alt-F3` | Close the window and cancel its pending requests |
+
+In input fields, unmodified left/right arrows move the text cursor.
+Browser shortcuts appear in the application status line while its window is active;
+there is no button toolbar.
+LXMF links open a conversation. File downloads still require the web frontend.
+
+To build the terminal frontend for an already running `rnsd-rs` shared instance:
+
+```text
+cargo build --no-default-features --features=reticulum-client,tui --bin nomadnet-tui
+./target/debug/nomadnet-tui
+```
 
 The browser interface deliberately omits QR codes, BLE management, page
 hosting, and printing. Reticulum interfaces are exposed only as read-only
@@ -288,8 +321,11 @@ This repository is an experimental but usable vertical slice. Runtime
 lifecycle, interface statistics, directory discovery, persistent LXMF
 messaging, automatic/direct/opportunistic/propagated delivery, multi-hub RRC,
 and remote-page browsing are functional and have interoperability coverage.
-The browser supports the practical Micron Guide surface, forms, partials,
+The web browser supports the practical Micron Guide surface, forms, partials,
 anchors, cache control, Resource responses, and downloads. Messaging includes
 durable unread state and drafts, searchable history, delivery details, and
 responsive navigation. Browser, messaging, RRC, reliability, security, and
 deployment-hardening blocks are complete.
+The TUI browser renders the shared Micron model with interactive forms, links,
+anchors, and partials; file downloads remain web-only. Its keyboard controls and
+shared-instance build command are documented above.

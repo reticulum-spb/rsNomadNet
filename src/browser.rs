@@ -415,6 +415,11 @@ pub fn parse_page(
             }
         }
         if content.is_empty() {
+            blocks.push(MicronBlock::Paragraph {
+                depth,
+                alignment,
+                parts: Vec::new(),
+            });
             continue;
         }
         let parts = parse_inline(content, &mut style);
@@ -840,14 +845,17 @@ mod tests {
             false,
         )
         .unwrap();
-        let MicronBlock::Paragraph { parts, .. } = &page.blocks[1] else {
+        assert!(
+            matches!(&page.blocks[1], MicronBlock::Paragraph { parts, .. } if parts.is_empty())
+        );
+        let MicronBlock::Paragraph { parts, .. } = &page.blocks[2] else {
             panic!("expected field paragraph");
         };
         assert!(matches!(
             &parts[1],
             Inline::Input { name, value, .. } if name == "username" && value == "Anonymous"
         ));
-        let MicronBlock::Paragraph { parts, .. } = &page.blocks[2] else {
+        let MicronBlock::Paragraph { parts, .. } = &page.blocks[4] else {
             panic!("expected submit paragraph");
         };
         assert!(matches!(

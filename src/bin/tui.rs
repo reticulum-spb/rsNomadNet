@@ -27,6 +27,8 @@ mod updates;
 use updates::{UpdateReceiver, UpdateSender, update_channel};
 #[path = "tui/bridge.rs"]
 mod bridge;
+#[path = "tui/browser/mod.rs"]
+mod browser;
 #[path = "tui/windows.rs"]
 mod windows;
 use windows::{ManagedWindow, WindowRegistry};
@@ -102,9 +104,7 @@ enum UiCommand {
     ConnectRrc {
         destination_hash: String,
     },
-    FetchNodePage {
-        destination_hash: String,
-    },
+    BrowserFetch(browser::Request),
     OpenConversation {
         destination_hash: String,
     },
@@ -636,6 +636,20 @@ impl TuiApp {
     fn status_line(mut bounds: Rect) -> Option<Box<dyn View>> {
         bounds.a.y = bounds.b.y - 1;
         let definitions = StatusDef::list()
+            .def_one_of([browser::HELP], |definition| {
+                definition
+                    // Arrows are handled by the page, preserving input cursor movement.
+                    .item("~Left~ Back", None, browser::BACK)
+                    .item("~Right~ Forward", None, browser::FORWARD)
+                    .item("~Ctrl-R~ Reload", None, browser::RELOAD)
+                    .item("~Esc~ Stop", None, browser::STOP)
+                    .key_item(alt('x'), Command::QUIT)
+                    .key_item(KeyEvent::from(Key::F(5)), Command::ZOOM)
+                    .key_item(KeyEvent::from(Key::F(6)), Command::NEXT)
+                    .key_item(window_key(Key::F(5), true, false, false), Command::RESIZE)
+                    .key_item(window_key(Key::F(6), false, true, false), Command::PREV)
+                    .key_item(window_key(Key::F(3), false, false, true), Command::CLOSE)
+            })
             .def_all(|definition| {
                 definition
                     .item("~Alt-X~ Exit", alt('x'), Command::QUIT)
@@ -753,43 +767,46 @@ impl TuiApp {
                     return;
                 };
                 let bounds = program.desktop_rect();
-                let (title, key, ui_command) = if command == OPEN_RRC_HUB {
-                    (
-                        "RRC Hub",
-                        format!("rrc:{destination_hash}"),
-                        UiCommand::ConnectRrc {
-                            destination_hash: destination_hash.clone(),
-                        },
-                    )
-                } else {
-                    (
-                        "NomadNet Browser",
-                        format!("node:{destination_hash}"),
-                        UiCommand::FetchNodePage {
-                            destination_hash: destination_hash.clone(),
-                        },
-                    )
-                };
+                let key = format!(
+                    "{}:{destination_hash}",
+                    if command == OPEN_RRC_HUB {
+                        "rrc"
+                    } else {
+                        "node"
+                    }
+                );
                 if windows.borrow_mut().focus_existing(&key) {
                     return;
                 }
-                state
-                    .borrow_mut()
-                    .directory_views
-                    .insert(key.clone(), vec!["Loading…".into()]);
-                program.desktop_insert(Box::new(ManagedWindow::new(
+                let view: Box<dyn View> = if command == OPEN_NODE_BROWSER {
+                    Box::new(browser::window(
+                        bounds,
+                        state.clone(),
+                        &destination_hash,
+                        commands.clone(),
+                    ))
+                } else {
+                    state
+                        .borrow_mut()
+                        .directory_views
+                        .insert(key.clone(), vec!["Loading…".into()]);
+                    let _ = commands.send(UiCommand::ConnectRrc {
+                        destination_hash: destination_hash.clone(),
+                    });
                     Box::new(directory_target_window(
                         bounds,
                         state.clone(),
                         &destination_hash,
-                        title,
+                        "RRC Hub",
                         key.clone(),
-                    )),
+                    ))
+                };
+                program.desktop_insert(Box::new(ManagedWindow::new(
+                    view,
                     key,
                     windows.clone(),
                     commands.clone(),
                 )));
-                let _ = commands.send(ui_command);
             }
         })
     }
@@ -1087,47 +1104,6 @@ fn rrc_message_line(message: RrcMessageView) -> String {
     } else {
         format!("[{room}{nick}] {}", message.body)
     }
-}
-
-fn browser_page_lines(page: BrowserPage) -> Vec<String> {
-    let mut lines = vec![page.title.unwrap_or_else(|| page.url.clone()), page.url];
-    for block in page.blocks {
-        match block {
-            MicronBlock::Heading { parts, .. } => lines.push(inline_text(&parts)),
-            MicronBlock::Paragraph { depth, parts, .. } => lines.push(format!(
-                "{}{}",
-                "  ".repeat(depth as usize),
-                inline_text(&parts)
-            )),
-            MicronBlock::Divider { character, .. } => {
-                lines.push(std::iter::repeat_n(character, 40).collect())
-            }
-            MicronBlock::Preformatted { text } => lines.extend(text.lines().map(str::to_owned)),
-            MicronBlock::Table { rows, .. } => lines.extend(rows.into_iter().map(|row| {
-                row.into_iter()
-                    .map(|cell| inline_text(&cell))
-                    .collect::<Vec<_>>()
-                    .join(" | ")
-            })),
-            MicronBlock::Partial { target, .. } => lines.push(format!("[partial: {target}]")),
-        }
-    }
-    lines
-}
-
-fn inline_text(parts: &[Inline]) -> String {
-    parts
-        .iter()
-        .map(|part| match part {
-            Inline::Text { text, .. } => text.clone(),
-            Inline::Link { label, target, .. } => format!("{label} [{target}]"),
-            Inline::Input { value, .. } => value.clone(),
-            Inline::Checkbox { label, checked, .. } | Inline::Radio { label, checked, .. } => {
-                format!("[{}] {label}", if *checked { 'x' } else { ' ' })
-            }
-            Inline::Anchor { name } => format!("#{name}"),
-        })
-        .collect()
 }
 
 fn network_lines(network: NetworkSnapshot) -> Vec<String> {
@@ -1641,7 +1617,7 @@ mod tests {
         assert!(frame.contains("SPb Node"));
         assert!(matches!(
             commands.try_recv(),
-            Ok(UiCommand::FetchNodePage { destination_hash: actual }) if actual == destination_hash
+            Ok(UiCommand::BrowserFetch(request)) if request.url == node_index_url(destination_hash)
         ));
         assert_eq!(
             node_index_url(destination_hash),
