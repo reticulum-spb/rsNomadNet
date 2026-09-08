@@ -122,6 +122,11 @@ loads 500 older messages (up to 10,000 per open conversation). Directory shows
 the 200 most recent destinations and retains the selected entry during refresh.
 Omit `--offline` to start the configured Reticulum interfaces.
 
+The Windows menu (`Alt-W`) provides Size/Move (`Ctrl-F5`), Zoom (`F5`),
+Tile, Cascade, Next (`F6`), Previous (`Shift-F6`), and Close (`Alt-F3`).
+In Size/Move mode use arrows to move, Shift-arrows to resize, Enter to accept,
+or Escape to cancel. Network is a gray information window without scrolling.
+
 The browser interface deliberately omits QR codes, BLE management, page
 hosting, and printing. Reticulum interfaces are exposed only as read-only
 statistics. The intended scope is LXMF text messaging, remote NomadNet page

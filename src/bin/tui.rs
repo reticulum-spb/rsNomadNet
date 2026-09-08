@@ -12,12 +12,14 @@ use rsnomadnet_core::models::{
     ConversationSummary, DirectoryEntry, NetworkSnapshot, RrcHubView, RrcMessageView, ServerEvent,
 };
 use rsnomadnet_core::service::{AppService, FetchPage, SendMessage};
+use tv::window::WindowPalette;
 use tv::{
     Backend, Button, ButtonFlags, Command, Context, CrosstermBackend, Desktop, Dialog, DrawCtx,
     Event, FieldValue, GrowMode, InputLine, Key, ListBox, Menu, MenuBar, Program, Rect, ScrollBar,
     StaticText, StatusDef, StatusLine, SystemClock, Theme, View, ViewId, ViewState, Window,
     WindowFlags, alt, delegate,
 };
+use tv::{KeyEvent, KeyModifiers};
 use tvision_rs as tv;
 
 #[path = "tui/updates.rs"]
@@ -120,9 +122,25 @@ type ActiveComposer = Rc<RefCell<Option<(String, SharedText)>>>;
 
 #[derive(Clone, Copy)]
 enum Pane {
-    Network,
     Conversations,
     Directory,
+}
+
+struct NetworkInfo {
+    text: StaticText,
+    shared: Shared,
+}
+
+#[delegate(to = text)]
+impl View for NetworkInfo {
+    fn draw(&mut self, context: &mut DrawCtx) {
+        self.text.set_text(self.shared.borrow().network.join("\n"));
+        self.text.draw(context);
+    }
+}
+
+fn window_key(key: Key, ctrl: bool, shift: bool, alt: bool) -> KeyEvent {
+    KeyEvent::new(key, KeyModifiers { ctrl, shift, alt })
 }
 
 struct ComposerInput {
@@ -302,19 +320,24 @@ struct StateList {
 
 impl StateList {
     fn new(bounds: Rect, state: Shared, pane: Pane) -> Self {
-        Self {
+        let mut view = Self {
             list: ListBox::new(bounds, 1, None, None),
             state,
             pane,
             seeded: false,
             row_ids: Vec::new(),
-        }
+        };
+        view.state_mut().grow_mode = GrowMode {
+            hi_x: true,
+            hi_y: true,
+            ..Default::default()
+        };
+        view
     }
 
     fn lines(&self) -> Vec<String> {
         let state = self.state.borrow();
         match self.pane {
-            Pane::Network => state.network.clone(),
             Pane::Conversations => state
                 .conversations
                 .iter()
@@ -348,7 +371,6 @@ impl StateList {
                 .iter()
                 .map(|row| row.destination_hash.clone())
                 .collect(),
-            Pane::Network => Vec::new(),
         }
     }
 
@@ -418,7 +440,6 @@ impl View for StateList {
                     Some(DirectoryKind::Node) => Some(OPEN_NODE_BROWSER),
                     _ => None,
                 },
-                Pane::Network => None,
             };
             if let Some(command) = command {
                 context.put_event(Event::Command(command));
@@ -563,6 +584,7 @@ impl TuiApp {
             1,
         );
         let extent = conversations.state().get_extent();
+        conversations.state_mut().options.tileable = true;
         conversations.insert_child(Box::new(StateList::new(
             Rect::new(1, 1, extent.b.x - 1, extent.b.y - 1),
             state.clone(),
@@ -574,18 +596,26 @@ impl TuiApp {
             Some("Network".into()),
             2,
         );
+        network.set_palette(WindowPalette::Gray);
+        network.state_mut().options.tileable = true;
         let extent = network.state().get_extent();
-        network.insert_child(Box::new(StateList::new(
-            Rect::new(1, 1, extent.b.x - 1, extent.b.y - 1),
-            state.clone(),
-            Pane::Network,
-        )));
+        let mut info = NetworkInfo {
+            text: StaticText::new(Rect::new(1, 1, extent.b.x - 1, extent.b.y - 1), ""),
+            shared: state.clone(),
+        };
+        info.state_mut().grow_mode = GrowMode {
+            hi_x: true,
+            hi_y: true,
+            ..Default::default()
+        };
+        network.insert_child(Box::new(info));
         let mut directory = Window::new(
             Rect::new(middle, split, bounds.b.x - 1, bottom),
             Some("Directory".into()),
             3,
         );
         let extent = directory.state().get_extent();
+        directory.state_mut().options.tileable = true;
         directory.insert_child(Box::new(StateList::new(
             Rect::new(1, 1, extent.b.x - 1, extent.b.y - 1),
             state.clone(),
@@ -606,7 +636,15 @@ impl TuiApp {
     fn status_line(mut bounds: Rect) -> Option<Box<dyn View>> {
         bounds.a.y = bounds.b.y - 1;
         let definitions = StatusDef::list()
-            .def_all(|definition| definition.item("~Alt-X~ Exit", alt('x'), Command::QUIT))
+            .def_all(|definition| {
+                definition
+                    .item("~Alt-X~ Exit", alt('x'), Command::QUIT)
+                    .item("~F5~ Zoom", KeyEvent::from(Key::F(5)), Command::ZOOM)
+                    .item("~F6~ Next", KeyEvent::from(Key::F(6)), Command::NEXT)
+                    .key_item(window_key(Key::F(5), true, false, false), Command::RESIZE)
+                    .key_item(window_key(Key::F(6), false, true, false), Command::PREV)
+                    .key_item(window_key(Key::F(3), false, false, true), Command::CLOSE)
+            })
             .build();
         Some(Box::new(StatusLine::new(bounds, definitions)))
     }
@@ -616,6 +654,30 @@ impl TuiApp {
         let menu = Menu::builder()
             .submenu("~F~ile", alt('f'), |menu| {
                 menu.command_key("E~x~it", Command::QUIT, alt('x'), "Alt-X")
+            })
+            .submenu("~W~indows", alt('w'), |menu| {
+                menu.command_key(
+                    "~S~ize/Move",
+                    Command::RESIZE,
+                    window_key(Key::F(5), true, false, false),
+                    "Ctrl-F5",
+                )
+                .command_key("~Z~oom", Command::ZOOM, KeyEvent::from(Key::F(5)), "F5")
+                .command("~T~ile", Command::TILE)
+                .command("C~a~scade", Command::CASCADE)
+                .command_key("~N~ext", Command::NEXT, KeyEvent::from(Key::F(6)), "F6")
+                .command_key(
+                    "~P~revious",
+                    Command::PREV,
+                    window_key(Key::F(6), false, true, false),
+                    "Shift-F6",
+                )
+                .command_key(
+                    "~C~lose",
+                    Command::CLOSE,
+                    window_key(Key::F(3), false, false, true),
+                    "Alt-F3",
+                )
             })
             .build();
         Some(Box::new(MenuBar::new(bounds, menu)))
@@ -1207,6 +1269,60 @@ mod tests {
         let mut deferred = Vec::new();
         let mut context = Context::new(&mut events, &mut timers, 0, &mut deferred);
         run(&mut context);
+    }
+
+    #[test]
+    fn window_commands_arrange_zoom_and_close_network() {
+        let (backend, screen) = HeadlessBackend::new(100, 30);
+        let shared = Rc::new(RefCell::new(UiState {
+            network: vec!["State: Online".into()],
+            ..UiState::default()
+        }));
+        let (_sender, updates) = update_channel();
+        let mut app = TuiApp::new(Box::new(backend), shared, updates);
+        for _ in 0..12 {
+            app.program.pump_once();
+        }
+        let initial = screen.snapshot();
+        screen.push_event(Event::Command(Command::TILE));
+        for _ in 0..12 {
+            app.program.pump_once();
+        }
+        let tiled = screen.snapshot();
+        assert_ne!(tiled, initial);
+        screen.push_event(Event::Command(Command::CASCADE));
+        for _ in 0..12 {
+            app.program.pump_once();
+        }
+        assert_ne!(screen.snapshot(), tiled);
+        screen.push_key(
+            Key::Char('2'),
+            KeyModifiers {
+                alt: true,
+                ..Default::default()
+            },
+        );
+        for _ in 0..12 {
+            app.program.pump_once();
+        }
+        let before_zoom = screen.snapshot();
+        screen.push_key(Key::F(5), KeyModifiers::default());
+        for _ in 0..12 {
+            app.program.pump_once();
+        }
+        assert_ne!(screen.snapshot(), before_zoom);
+        assert!(screen.snapshot().contains("State: Online"));
+        screen.push_key(
+            Key::F(3),
+            KeyModifiers {
+                alt: true,
+                ..Default::default()
+            },
+        );
+        for _ in 0..12 {
+            app.program.pump_once();
+        }
+        assert!(!screen.snapshot().contains("State: Online"));
     }
 
     #[test]

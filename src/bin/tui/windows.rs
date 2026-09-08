@@ -27,12 +27,13 @@ pub(super) struct ManagedWindow {
 
 impl ManagedWindow {
     pub(super) fn new(
-        inner: Box<dyn View>,
+        mut inner: Box<dyn View>,
         key: String,
         registry: Rc<RefCell<WindowRegistry>>,
         commands: tokio::sync::mpsc::UnboundedSender<UiCommand>,
     ) -> Self {
         registry.borrow_mut().keys.insert(key.clone());
+        inner.state_mut().options.tileable = true;
         Self {
             inner,
             key,
