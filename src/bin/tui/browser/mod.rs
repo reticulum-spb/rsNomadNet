@@ -740,18 +740,40 @@ pub(super) struct BrowserWindow {
     address: ViewId,
     page: ViewId,
     seeded: bool,
+    restore_network: Option<Shared>,
+}
+
+impl BrowserWindow {
+    pub(super) fn current_url(&self) -> String {
+        self.session.borrow().url.clone()
+    }
 }
 
 #[delegate(to = window)]
 impl View for BrowserWindow {
+    fn as_any_mut(&mut self) -> Option<&mut dyn std::any::Any> {
+        Some(self)
+    }
     fn get_help_ctx(&self) -> tv::help::HelpCtx {
         HELP
     }
 
     fn handle_event(&mut self, event: &mut Event, ctx: &mut Context) {
+        if self.session.borrow().generation > 0 {
+            self.restore_network = None;
+        }
+        if self.restore_network.as_ref().is_some_and(layout::online) {
+            self.restore_network = None;
+            let url = self.current_url();
+            self.session
+                .borrow_mut()
+                .navigate(&url, false, BTreeMap::new(), true);
+        }
         if !self.seeded {
             self.seeded = true;
-            ctx.request_focus(self.page);
+            if self.window.state().state.focused {
+                ctx.request_focus(self.page);
+            }
         }
         {
             let mut session = self.session.borrow_mut();
@@ -782,7 +804,10 @@ impl View for BrowserWindow {
                     .borrow_mut()
                     .navigate(&url, true, BTreeMap::new(), false);
             }
-            Some(STOP) => self.session.borrow_mut().stop(),
+            Some(STOP) => {
+                self.restore_network = None;
+                self.session.borrow_mut().stop();
+            }
             _ => {
                 self.window.handle_event(event, ctx);
                 return;
@@ -799,6 +824,35 @@ pub(super) fn window(
     destination: &str,
     commands: tokio::sync::mpsc::UnboundedSender<UiCommand>,
 ) -> BrowserWindow {
+    create_window(desktop, shared, destination, commands, None)
+}
+
+pub(super) fn restored_window(
+    desktop: Rect,
+    shared: Shared,
+    destination: &str,
+    commands: tokio::sync::mpsc::UnboundedSender<UiCommand>,
+    url: Option<&str>,
+) -> BrowserWindow {
+    create_window(
+        desktop,
+        shared,
+        destination,
+        commands,
+        Some(
+            url.map(str::to_owned)
+                .unwrap_or_else(|| node_index_url(destination)),
+        ),
+    )
+}
+
+fn create_window(
+    desktop: Rect,
+    shared: Shared,
+    destination: &str,
+    commands: tokio::sync::mpsc::UnboundedSender<UiCommand>,
+    restore_url: Option<String>,
+) -> BrowserWindow {
     let width = (desktop.b.x - desktop.a.x - 2).clamp(44, 100);
     let height = (desktop.b.y - desktop.a.y - 2).clamp(10, 32);
     let title = format!(
@@ -813,11 +867,16 @@ pub(super) fn window(
         zoom: true,
     });
     window.set_min_size(Point::new(44, 10));
-    let url = node_index_url(destination);
+    let restore_network = restore_url.as_ref().map(|_| shared.clone());
+    let url = restore_url.unwrap_or_else(|| node_index_url(destination));
     let session = Rc::new(RefCell::new(Session::new(url.clone(), commands)));
-    session
-        .borrow_mut()
-        .navigate(&url, false, BTreeMap::new(), true);
+    if restore_network.is_none() {
+        session
+            .borrow_mut()
+            .navigate(&url, false, BTreeMap::new(), true);
+    } else {
+        session.borrow_mut().status = "Waiting for network…".into();
+    }
     let mut state = ViewState::new(Rect::new(1, 2, width - 1, height - 2));
     state.options.selectable = true;
     state.grow_mode = GrowMode {
@@ -856,5 +915,6 @@ pub(super) fn window(
         address,
         page,
         seeded: false,
+        restore_network,
     }
 }

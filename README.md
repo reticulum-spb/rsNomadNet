@@ -128,6 +128,21 @@ Tile, Cascade, Next (`F6`), Previous (`Shift-F6`), and Close (`Alt-F3`).
 In Size/Move mode use arrows to move, Shift-arrows to resize, Enter to accept,
 or Escape to cancel. Network is a gray information window without scrolling.
 
+On normal exit (`Alt-X`), the TUI saves open windows, their positions and sizes,
+the active window, and each Browser's current address to `~/.rsNomadNet/tui.yaml`.
+With `--state-dir`, the file is stored in that directory alongside `nomadnet.db`
+and the identity; `--rns-config` does not change this location. The next launch
+restores the saved layout, including LXMF conversations and RRC hubs. Closed
+windows stay closed. Coordinates and sizes are adjusted to fit a smaller terminal.
+Restored Browser and RRC windows wait until the network is online before loading.
+Page form contents and navigation history are not stored in `tui.yaml`.
+
+The layout is written atomically and is owner-only on Unix. If the file is
+invalid or has an unsupported version, the default windows are used and the
+original file is not overwritten; a diagnostic is printed after exiting.
+To reset the layout, rename `tui.yaml` while the TUI is not running. Forced
+termination or a crash does not save the latest layout.
+
 The page browser has a gray window frame and a black page background by
 default (Micron page colors override the default). It renders headings,
 sections, inline colors and emphasis, aligned/wrapped text, literal blocks,

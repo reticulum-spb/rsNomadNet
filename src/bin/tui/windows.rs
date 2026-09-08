@@ -26,6 +26,13 @@ pub(super) struct ManagedWindow {
 }
 
 impl ManagedWindow {
+    pub(super) fn browser_url(&mut self) -> Option<String> {
+        self.inner
+            .as_any_mut()?
+            .downcast_mut::<browser::BrowserWindow>()
+            .map(|window| window.current_url())
+    }
+
     pub(super) fn new(
         mut inner: Box<dyn View>,
         key: String,

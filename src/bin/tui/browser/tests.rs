@@ -3,6 +3,37 @@ use rsnomadnet_core::browser::{Alignment, MicronStyle, parse_page};
 
 const URL: &str = "00112233445566778899aabbccddeeff:/page/index.mu";
 
+#[test]
+fn restored_browser_waits_for_network_then_loads_saved_url_once() {
+    let (backend, screen) = tv::HeadlessBackend::new(100, 30);
+    let shared = Rc::new(RefCell::new(UiState::default()));
+    let (_sender, updates) = update_channel();
+    let (sender, mut commands) = tokio::sync::mpsc::unbounded_channel();
+    let mut app = TuiApp::new(Box::new(backend), shared.clone(), updates);
+    let url = URL.replace("index.mu", "saved.mu");
+    let browser = restored_window(
+        Rect::new(0, 0, 100, 28),
+        shared.clone(),
+        URL.split(':').next().unwrap(),
+        sender,
+        Some(&url),
+    );
+    app.program.desktop_insert(Box::new(browser));
+    for _ in 0..8 {
+        app.program.pump_once();
+    }
+    assert!(commands.try_recv().is_err());
+    shared.borrow_mut().network = vec!["State: Online".into()];
+    screen.push_key(Key::Tab, tv::KeyModifiers::default());
+    for _ in 0..8 {
+        app.program.pump_once();
+    }
+    assert!(
+        matches!(commands.try_recv(), Ok(UiCommand::BrowserFetch(request)) if request.url == url)
+    );
+    assert!(commands.try_recv().is_err());
+}
+
 fn page(source: &str) -> BrowserPage {
     parse_page(URL.into(), source.as_bytes(), false).unwrap()
 }

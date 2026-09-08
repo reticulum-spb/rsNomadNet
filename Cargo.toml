@@ -9,7 +9,7 @@ description = "A web client compatible with NomadNet"
 [features]
 default = ["reticulum-full", "web"]
 web = ["dep:axum", "dep:tower-http"]
-tui = ["dep:tvision-rs", "dep:unicode-width", "dep:unicode-segmentation"]
+tui = ["dep:tvision-rs", "dep:unicode-width", "dep:unicode-segmentation", "dep:serde_yaml"]
 reticulum-full = [
     "lxmf-core/reticulum-full",
     "rns-runtime/full",
@@ -54,6 +54,7 @@ serde = { version = "1", features = ["derive"] }
 serde_cbor = "0.11"
 rs-rrc-client = { path = "../rsRRC-client", default-features = false }
 serde_json = "1"
+serde_yaml = { version = "0.9", optional = true }
 thiserror = "2"
 tokio = { version = "1", features = ["full"] }
 tower-http = { version = "0.6", features = ["trace"], optional = true }

@@ -29,6 +29,8 @@ use updates::{UpdateReceiver, UpdateSender, update_channel};
 mod bridge;
 #[path = "tui/browser/mod.rs"]
 mod browser;
+#[path = "tui/layout.rs"]
+mod layout;
 #[path = "tui/windows.rs"]
 mod windows;
 use windows::{ManagedWindow, WindowRegistry};
@@ -552,22 +554,47 @@ impl View for PumpView {
 
 struct TuiApp {
     program: Program,
+    layout: layout::Store,
+    saved: Option<layout::Layout>,
 }
 
 impl TuiApp {
+    #[cfg(test)]
     fn new(backend: Box<dyn Backend>, state: Shared, updates: UpdateReceiver) -> Self {
+        Self::with_layout(backend, state, updates, None)
+    }
+
+    fn with_layout(
+        backend: Box<dyn Backend>,
+        state: Shared,
+        updates: UpdateReceiver,
+        saved: Option<layout::Layout>,
+    ) -> Self {
+        let layout = Rc::new(RefCell::new(layout::Layout::default()));
+        let tracked = layout.clone();
+        let restore = saved.clone();
         let program = Program::new(
             backend,
             Box::new(SystemClock::new()),
             Theme::classic_blue(),
-            move |bounds| Self::desktop(bounds, state.clone(), updates),
+            move |bounds| Self::desktop(bounds, state.clone(), updates, tracked, restore),
             Self::status_line,
             Self::menu_bar,
         );
-        Self { program }
+        Self {
+            program,
+            layout,
+            saved,
+        }
     }
 
-    fn desktop(mut bounds: Rect, state: Shared, updates: UpdateReceiver) -> Option<Box<dyn View>> {
+    fn desktop(
+        mut bounds: Rect,
+        state: Shared,
+        updates: UpdateReceiver,
+        layout: layout::Store,
+        saved: Option<layout::Layout>,
+    ) -> Option<Box<dyn View>> {
         bounds.a.y += 1;
         bounds.b.y -= 1;
         let mut desktop = Desktop::new(bounds, |rect| Some(Desktop::init_background(rect)));
@@ -626,10 +653,25 @@ impl TuiApp {
         // sees the first keyboard event regardless of which window is focused,
         // so external results cannot remain queued behind a stale Loading view.
         desktop.insert_view(Box::new(PumpView::new(state.clone(), updates)));
-        desktop.insert_view(Box::new(network));
-        desktop.insert_view(Box::new(directory));
-        // Insert conversations last so it is the initially focused window.
-        desktop.insert_view(Box::new(conversations));
+        // Insert conversations last so it is initially focused without a saved layout.
+        for (key, view) in [
+            ("network", Box::new(network) as Box<dyn View>),
+            ("directory", Box::new(directory)),
+            ("conversations", Box::new(conversations)),
+        ] {
+            if saved
+                .as_ref()
+                .is_none_or(|s| s.windows.iter().any(|w| w.key == key))
+            {
+                desktop.insert_view(Box::new(layout::TrackedWindow::new(
+                    view,
+                    key.into(),
+                    layout.clone(),
+                    saved.as_ref(),
+                    bounds,
+                )));
+            }
+        }
         Some(Box::new(desktop))
     }
 
@@ -704,6 +746,72 @@ impl TuiApp {
     ) -> Command {
         let active_composer: ActiveComposer = Rc::new(RefCell::new(None));
         let windows = Rc::new(RefCell::new(WindowRegistry::default()));
+        let tracked = self.layout.clone();
+        if let Some(saved) = &self.saved {
+            for entry in &saved.windows {
+                let Some((kind, hash)) = entry.key.split_once(':') else {
+                    continue;
+                };
+                let bounds = self.program.desktop_rect();
+                let mut pending = None;
+                let view: Box<dyn View> = match kind {
+                    "lxmf" => {
+                        let _ = commands.send(UiCommand::OpenConversation {
+                            destination_hash: hash.into(),
+                        });
+                        Box::new(conversation_window(
+                            bounds,
+                            state.clone(),
+                            hash.into(),
+                            active_composer.clone(),
+                        ))
+                    }
+                    "node" => Box::new(browser::restored_window(
+                        bounds,
+                        state.clone(),
+                        hash,
+                        commands.clone(),
+                        entry.url.as_deref(),
+                    )),
+                    "rrc" => {
+                        state
+                            .borrow_mut()
+                            .directory_views
+                            .insert(entry.key.clone(), vec!["Waiting for network…".into()]);
+                        pending = Some((
+                            state.clone(),
+                            commands.clone(),
+                            UiCommand::ConnectRrc {
+                                destination_hash: hash.into(),
+                            },
+                        ));
+                        Box::new(directory_target_window(
+                            bounds,
+                            state.clone(),
+                            hash,
+                            "RRC Hub",
+                            entry.key.clone(),
+                        ))
+                    }
+                    _ => continue,
+                };
+                let view = Box::new(ManagedWindow::new(
+                    view,
+                    entry.key.clone(),
+                    windows.clone(),
+                    commands.clone(),
+                ));
+                let mut view = layout::TrackedWindow::new(
+                    view,
+                    entry.key.clone(),
+                    tracked.clone(),
+                    Some(saved),
+                    bounds,
+                );
+                view.pending = pending;
+                self.program.desktop_insert(Box::new(view));
+            }
+        }
         self.program.run_app(move |program, command| {
             if command == LOAD_OLDER {
                 if let Some((destination_hash, _)) = active_composer.borrow().as_ref() {
@@ -751,16 +859,23 @@ impl TuiApp {
                 let _ = commands.send(UiCommand::OpenConversation {
                     destination_hash: destination_hash.clone(),
                 });
-                program.desktop_insert(Box::new(ManagedWindow::new(
+                let view = Box::new(ManagedWindow::new(
                     Box::new(conversation_window(
                         bounds,
                         state.clone(),
                         destination_hash,
                         active_composer.clone(),
                     )),
-                    key,
+                    key.clone(),
                     windows.clone(),
                     commands.clone(),
+                ));
+                program.desktop_insert(Box::new(layout::TrackedWindow::new(
+                    view,
+                    key,
+                    tracked.clone(),
+                    None,
+                    bounds,
                 )));
             } else if matches!(command, OPEN_RRC_HUB | OPEN_NODE_BROWSER) {
                 let Some(destination_hash) = selected_destination(&state.borrow()) else {
@@ -801,11 +916,18 @@ impl TuiApp {
                         key.clone(),
                     ))
                 };
-                program.desktop_insert(Box::new(ManagedWindow::new(
+                let view = Box::new(ManagedWindow::new(
                     view,
-                    key,
+                    key.clone(),
                     windows.clone(),
                     commands.clone(),
+                ));
+                program.desktop_insert(Box::new(layout::TrackedWindow::new(
+                    view,
+                    key,
+                    tracked.clone(),
+                    None,
+                    bounds,
                 )));
             }
         })
@@ -1202,6 +1324,17 @@ fn main() -> anyhow::Result<()> {
         rns_config: cli.rns_config,
         state_dir: cli.state_dir,
     })?;
+    let layout_path = config.database_path.with_file_name("tui.yaml");
+    let (saved_layout, layout_error) = match layout::load(&layout_path) {
+        Ok(saved) => (saved, None),
+        Err(error) => (
+            None,
+            Some(format!(
+                "Could not load {}: {error}. The file was left unchanged.",
+                layout_path.display()
+            )),
+        ),
+    };
     let tokio = tokio::runtime::Runtime::new()?;
     let core = {
         let _guard = tokio.enter();
@@ -1222,15 +1355,28 @@ fn main() -> anyhow::Result<()> {
     let (command_sender, commands) = tokio::sync::mpsc::unbounded_channel();
     let bridge = tokio.spawn(bridge::run(service, initial, sender, commands, events));
 
-    let mut app = TuiApp::new(Box::new(CrosstermBackend::new()?), shared.clone(), updates);
+    let mut app = TuiApp::with_layout(
+        Box::new(CrosstermBackend::new()?),
+        shared.clone(),
+        updates,
+        saved_layout,
+    );
     let _ = app.run(shared, command_sender);
-
+    let save_result = if layout_error.is_none() {
+        layout::save(&layout_path, &app.layout.borrow())
+    } else {
+        Ok(())
+    };
     drop(app);
     tokio.block_on(async {
         bridge.abort();
         let _ = bridge.await;
         core.shutdown().await;
     });
+    if let Some(error) = layout_error {
+        eprintln!("{error}");
+    }
+    save_result?;
     Ok(())
 }
 
