@@ -113,7 +113,13 @@ cargo run --features tui --bin nomadnet-tui -- --offline
 
 Select a peer in LXMF Conversations or Directory, then press `Enter`.
 This opens one conversation window containing scrollable message history and
-the new-message field; the selected peer is shown in its title. Use `Alt-X` to
+the new-message field; the selected peer is shown in its title. The window uses
+the blue palette, with a native splitter separating the resizable history pane
+from the fixed one-line composer. Press `Enter` in the composer to send without
+closing the window; `Tab` switches between the panes. `Ctrl-L` deletes the current
+peer's history from the local database, without closing the window or clearing
+the current input. Messages awaiting delivery prevent deletion. The shortcut
+is shown in the status line while the chat is active. Use `Alt-X` to
 leave the terminal frontend. Enter on an RRC hub or NomadNet node in Directory
 opens the corresponding hub or page-browser window.
 Reopening a target focuses its existing window. LXMF drafts remain in the input

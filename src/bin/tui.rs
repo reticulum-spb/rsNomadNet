@@ -29,6 +29,9 @@ use updates::{UpdateReceiver, UpdateSender, update_channel};
 mod bridge;
 #[path = "tui/browser/mod.rs"]
 mod browser;
+#[path = "tui/conversation.rs"]
+mod conversation;
+use conversation::{ActiveComposer, LOAD_OLDER, SEND_MESSAGE, window as conversation_window};
 #[path = "tui/directory.rs"]
 mod directory;
 #[path = "tui/layout.rs"]
@@ -42,8 +45,6 @@ const OPEN_CONVERSATIONS: Command = Command::custom("rsnomadnet.open_conversatio
 const OPEN_NETWORK: Command = Command::custom("rsnomadnet.open_network");
 const OPEN_DIRECTORY: Command = Command::custom("rsnomadnet.open_directory");
 const OPEN_CONVERSATION: Command = Command::custom("rsnomadnet.open_conversation");
-const SEND_MESSAGE: Command = Command::custom("rsnomadnet.send_message");
-const LOAD_OLDER: Command = Command::custom("rsnomadnet.load_older");
 const OPEN_RRC_HUB: Command = Command::custom("rsnomadnet.open_rrc_hub");
 const OPEN_NODE_BROWSER: Command = Command::custom("rsnomadnet.open_node_browser");
 const MAX_DIRECTORY_ROWS: usize = 200;
@@ -105,6 +106,10 @@ enum DirectoryKind {
 }
 
 enum UiCommand {
+    ClearConversation {
+        destination_hash: String,
+        reply: tokio::sync::oneshot::Sender<Result<(), String>>,
+    },
     SendMessage {
         destination_hash: String,
         content: String,
@@ -125,8 +130,6 @@ enum UiCommand {
 }
 
 type Shared = Rc<RefCell<UiState>>;
-type SharedText = Rc<RefCell<String>>;
-type ActiveComposer = Rc<RefCell<Option<(String, SharedText)>>>;
 
 #[derive(Clone, Copy)]
 enum Pane {
@@ -149,173 +152,6 @@ impl View for NetworkInfo {
 
 fn window_key(key: Key, ctrl: bool, shift: bool, alt: bool) -> KeyEvent {
     KeyEvent::new(key, KeyModifiers { ctrl, shift, alt })
-}
-
-struct ComposerInput {
-    input: InputLine,
-    content: SharedText,
-}
-
-impl ComposerInput {
-    fn new(bounds: Rect, content: SharedText) -> Self {
-        Self::with_limit(bounds, content, 4096)
-    }
-
-    fn with_limit(bounds: Rect, content: SharedText, limit: i32) -> Self {
-        Self {
-            input: InputLine::with_limit(bounds, limit),
-            content,
-        }
-    }
-}
-
-#[delegate(to = input)]
-impl View for ComposerInput {
-    fn as_any_mut(&mut self) -> Option<&mut dyn core::any::Any> {
-        Some(self)
-    }
-
-    fn draw(&mut self, context: &mut DrawCtx) {
-        let content = self.content.borrow().clone();
-        if self.input.value() != Some(FieldValue::Text(content.clone())) {
-            self.input.set_value(FieldValue::Text(content));
-        }
-        self.input.draw(context);
-    }
-
-    fn handle_event(&mut self, event: &mut Event, context: &mut Context) {
-        if matches!(event, Event::KeyDown(key) if key.key == Key::Enter) {
-            context.put_event(Event::Command(SEND_MESSAGE));
-            event.clear();
-            return;
-        }
-        let content = self.content.borrow().clone();
-        if self.input.value() != Some(FieldValue::Text(content.clone())) {
-            self.input.set_value_ctx(FieldValue::Text(content), context);
-        }
-        self.input.handle_event(event, context);
-        if let Some(FieldValue::Text(content)) = self.input.value() {
-            *self.content.borrow_mut() = content;
-        }
-    }
-}
-
-struct ConversationHistory {
-    list: ListBox,
-    state: Shared,
-    destination_hash: String,
-    seeded: bool,
-}
-
-impl ConversationHistory {
-    fn new(bounds: Rect, state: Shared, destination_hash: String, scroll_bar: ViewId) -> Self {
-        Self {
-            list: ListBox::new(bounds, 1, None, Some(scroll_bar)),
-            state,
-            destination_hash,
-            seeded: false,
-        }
-    }
-
-    fn lines(&self) -> Vec<String> {
-        let state = self.state.borrow();
-        let mut lines = state
-            .conversations
-            .iter()
-            .find(|conversation| conversation.destination_hash == self.destination_hash)
-            .map(|conversation| conversation.messages.clone())
-            .filter(|messages| !messages.is_empty())
-            .unwrap_or_else(|| vec!["No messages".into()]);
-        if let Some(error) = state.send_errors.get(&self.destination_hash) {
-            lines.push(format!("[!] {error}"));
-        }
-        if state.pending_sends.contains_key(&self.destination_hash) {
-            lines.push("[~] Waiting for message to be saved…".into());
-        }
-        lines
-    }
-}
-
-#[delegate(to = list)]
-impl View for ConversationHistory {
-    fn as_any_mut(&mut self) -> Option<&mut dyn core::any::Any> {
-        Some(self)
-    }
-
-    fn handle_event(&mut self, event: &mut Event, context: &mut Context) {
-        if matches!(event, Event::KeyDown(key) if key.key == Key::PageUp)
-            && self.list.value() == Some(FieldValue::Int(0))
-        {
-            context.put_event(Event::Command(LOAD_OLDER));
-            event.clear();
-        }
-        let lines = self.lines();
-        if !self.seeded || self.list.list() != lines {
-            let mut selected = self.list.value();
-            let follow = !self.seeded
-                || matches!(selected, Some(FieldValue::Int(index))
-                if index as usize >= self.list.list().len().saturating_sub(1));
-            if lines.len() > self.list.list().len() && lines.ends_with(self.list.list()) {
-                if let Some(FieldValue::Int(index)) = &mut selected {
-                    *index += (lines.len() - self.list.list().len()) as i32;
-                }
-            }
-            self.seeded = true;
-            self.list.new_list(lines.clone(), context);
-            tv::widgets::list_viewer::update_steps(&self.list, context);
-            if follow && !lines.is_empty() {
-                self.list.set_value_ctx(
-                    FieldValue::Int(lines.len().saturating_sub(1) as i32),
-                    context,
-                );
-            } else if let Some(selected) = selected {
-                self.list.set_value_ctx(selected, context);
-            }
-        }
-        self.list.handle_event(event, context);
-    }
-}
-
-struct ConversationWindow {
-    window: Dialog,
-    destination_hash: String,
-    content: SharedText,
-    active_composer: ActiveComposer,
-    shared: Shared,
-}
-
-impl Drop for ConversationWindow {
-    fn drop(&mut self) {
-        self.shared
-            .borrow_mut()
-            .drafts
-            .insert(self.destination_hash.clone(), self.content.borrow().clone());
-    }
-}
-
-#[delegate(to = window)]
-impl View for ConversationWindow {
-    fn as_any_mut(&mut self) -> Option<&mut dyn core::any::Any> {
-        Some(self)
-    }
-
-    fn handle_event(&mut self, event: &mut Event, context: &mut Context) {
-        if let Some(result) = self
-            .shared
-            .borrow_mut()
-            .send_results
-            .remove(&self.destination_hash)
-        {
-            if result.error.is_none() && self.content.borrow().trim() == result.content {
-                self.content.borrow_mut().clear();
-            }
-        }
-        if self.window.state().state.focused {
-            *self.active_composer.borrow_mut() =
-                Some((self.destination_hash.clone(), self.content.clone()));
-        }
-        self.window.handle_event(event, context);
-    }
 }
 
 struct StateList {
@@ -708,6 +544,16 @@ impl TuiApp {
     fn status_line(mut bounds: Rect) -> Option<Box<dyn View>> {
         bounds.a.y = bounds.b.y - 1;
         let definitions = StatusDef::list()
+            .def_one_of([conversation::HELP], |definition| {
+                definition
+                    .item("~Ctrl-L~ Clear history", None, conversation::CLEAR_HISTORY)
+                    .item("~Alt-X~ Exit", alt('x'), Command::QUIT)
+                    .item("~F5~ Zoom", KeyEvent::from(Key::F(5)), Command::ZOOM)
+                    .item("~F6~ Next", KeyEvent::from(Key::F(6)), Command::NEXT)
+                    .key_item(window_key(Key::F(5), true, false, false), Command::RESIZE)
+                    .key_item(window_key(Key::F(6), false, true, false), Command::PREV)
+                    .key_item(window_key(Key::F(3), false, false, true), Command::CLOSE)
+            })
             .def_one_of([browser::HELP], |definition| {
                 definition
                     // Arrows are handled by the page, preserving input cursor movement.
@@ -798,6 +644,7 @@ impl TuiApp {
                             state.clone(),
                             hash.into(),
                             active_composer.clone(),
+                            commands.clone(),
                         ))
                     }
                     "node" => Box::new(browser::restored_window(
@@ -863,36 +710,8 @@ impl TuiApp {
                         bounds,
                     )));
                 }
-            } else if command == LOAD_OLDER {
-                if let Some((destination_hash, _)) = active_composer.borrow().as_ref() {
-                    let _ = commands.send(UiCommand::LoadOlder {
-                        destination_hash: destination_hash.clone(),
-                    });
-                }
-            } else if command == SEND_MESSAGE {
-                let active = active_composer.borrow().clone();
-                if let Some((destination_hash, content)) = active {
-                    let message = content.borrow().trim().to_owned();
-                    if !message.is_empty()
-                        && !state.borrow().pending_sends.contains_key(&destination_hash)
-                    {
-                        let sent = commands.send(UiCommand::SendMessage {
-                            destination_hash: destination_hash.clone(),
-                            content: message.clone(),
-                        });
-                        if sent.is_ok() {
-                            state
-                                .borrow_mut()
-                                .pending_sends
-                                .insert(destination_hash, message);
-                        } else {
-                            state
-                                .borrow_mut()
-                                .send_errors
-                                .insert(destination_hash, "Application worker stopped".into());
-                        }
-                    }
-                }
+            } else if matches!(command, SEND_MESSAGE | LOAD_OLDER) {
+                conversation::handle_command(command, &state, &active_composer, &commands);
             } else if command == OPEN_CONVERSATION {
                 let Some(destination_hash) = selected_destination(&state.borrow()) else {
                     program.exec_view(Box::new(message_dialog(
@@ -915,6 +734,7 @@ impl TuiApp {
                         state.clone(),
                         destination_hash,
                         active_composer.clone(),
+                        commands.clone(),
                     )),
                     key.clone(),
                     windows.clone(),
@@ -1110,98 +930,6 @@ fn selected_destination(state: &UiState) -> Option<String> {
             .first()
             .map(|conversation| conversation.destination_hash.clone())
     })
-}
-
-fn conversation_window(
-    desktop: Rect,
-    state: Shared,
-    destination_hash: String,
-    active_composer: ActiveComposer,
-) -> ConversationWindow {
-    let borrowed = state.borrow();
-    let conversation = borrowed
-        .conversations
-        .iter()
-        .find(|conversation| conversation.destination_hash == destination_hash);
-    let title = conversation
-        .map(|conversation| conversation.title.as_str())
-        .or_else(|| {
-            borrowed
-                .directory
-                .iter()
-                .find(|entry| entry.destination_hash == destination_hash)
-                .map(|entry| entry.title.as_str())
-        })
-        .unwrap_or(&destination_hash)
-        .to_owned();
-    drop(borrowed);
-
-    let width = 78.min(desktop.b.x - desktop.a.x - 2).max(40);
-    let height = 25.min(desktop.b.y - desktop.a.y - 2).max(12);
-    let left = desktop.a.x + ((desktop.b.x - desktop.a.x - width) / 2).max(0);
-    let top = desktop.a.y + ((desktop.b.y - desktop.a.y - height) / 2).max(0);
-    // A Dialog inserted directly into the Desktop remains non-modal while
-    // retaining the gray dialog palette.
-    let mut window = Dialog::new(
-        Rect::new(left, top, left + width, top + height),
-        Some(format!("LXMF Conversation — {title}")),
-    );
-    window.set_flags(WindowFlags {
-        r#move: true,
-        grow: true,
-        close: true,
-        zoom: true,
-    });
-    let extent = window.state().get_extent();
-    let content = Rc::new(RefCell::new(
-        state
-            .borrow()
-            .drafts
-            .get(&destination_hash)
-            .cloned()
-            .unwrap_or_default(),
-    ));
-    *active_composer.borrow_mut() = Some((destination_hash.clone(), content.clone()));
-    let mut history_scroll =
-        ScrollBar::new(Rect::new(extent.b.x - 2, 1, extent.b.x - 1, extent.b.y - 2));
-    history_scroll.state_mut().grow_mode = GrowMode {
-        lo_x: true,
-        hi_x: true,
-        hi_y: true,
-        ..Default::default()
-    };
-    let history_scroll = window.insert_child(Box::new(history_scroll));
-    let mut history = ConversationHistory::new(
-        Rect::new(1, 1, extent.b.x - 2, extent.b.y - 2),
-        state.clone(),
-        destination_hash.clone(),
-        history_scroll,
-    );
-    history.state_mut().grow_mode = GrowMode {
-        hi_x: true,
-        hi_y: true,
-        ..Default::default()
-    };
-    window.insert_child(Box::new(history));
-    // The last selectable child becomes current when the window is built.
-    let mut input = ComposerInput::new(
-        Rect::new(1, extent.b.y - 2, extent.b.x - 1, extent.b.y - 1),
-        content.clone(),
-    );
-    input.state_mut().grow_mode = GrowMode {
-        hi_x: true,
-        lo_y: true,
-        hi_y: true,
-        ..Default::default()
-    };
-    window.insert_child(Box::new(input));
-    ConversationWindow {
-        window,
-        destination_hash,
-        content,
-        active_composer,
-        shared: state,
-    }
 }
 
 fn message_line(outbound: bool, state: &str, content: &str) -> String {
@@ -1525,7 +1253,7 @@ mod tests {
         );
     }
 
-    fn with_context(run: impl FnOnce(&mut Context)) {
+    pub(super) fn with_context(run: impl FnOnce(&mut Context)) {
         let mut events = std::collections::VecDeque::new();
         let mut timers = tv::TimerQueue::new();
         let mut deferred = Vec::new();
@@ -1616,51 +1344,6 @@ mod tests {
     }
 
     #[test]
-    fn lxmf_keeps_reading_position_and_only_follows_at_the_end() {
-        let state = Rc::new(RefCell::new(UiState {
-            conversations: vec![ConversationRow {
-                destination_hash: "aa".into(),
-                title: "Alice".into(),
-                label: "Alice".into(),
-                messages: (0..50).map(|n| format!("Message {n}")).collect(),
-            }],
-            ..UiState::default()
-        }));
-        let mut window = Dialog::new(Rect::new(0, 0, 40, 12), None);
-        let scroll = window.insert_child(Box::new(ScrollBar::new(Rect::new(38, 1, 39, 10))));
-        let mut history =
-            ConversationHistory::new(Rect::new(1, 1, 38, 10), state.clone(), "aa".into(), scroll);
-        with_context(|ctx| {
-            let mut refresh = Event::Broadcast {
-                command: REFRESH,
-                source: None,
-            };
-            history.handle_event(&mut refresh, ctx);
-            assert_eq!(history.list.value(), Some(FieldValue::Int(49)));
-            history.list.set_value_ctx(FieldValue::Int(10), ctx);
-            history.handle_event(&mut refresh, ctx);
-            assert_eq!(history.list.value(), Some(FieldValue::Int(10)));
-            state.borrow_mut().conversations[0]
-                .messages
-                .push("New message".into());
-            history.handle_event(&mut refresh, ctx);
-            assert_eq!(history.list.value(), Some(FieldValue::Int(10)));
-            history.list.set_value_ctx(FieldValue::Int(50), ctx);
-            state.borrow_mut().conversations[0]
-                .messages
-                .push("Another new message".into());
-            history.handle_event(&mut refresh, ctx);
-            assert_eq!(history.list.value(), Some(FieldValue::Int(51)));
-            history.list.set_value_ctx(FieldValue::Int(0), ctx);
-            state.borrow_mut().conversations[0]
-                .messages
-                .insert(0, "Older message".into());
-            history.handle_event(&mut refresh, ctx);
-            assert_eq!(history.list.value(), Some(FieldValue::Int(1)));
-        });
-    }
-
-    #[test]
     fn directory_tracks_identity_when_equal_labels_are_reordered() {
         let state = Rc::new(RefCell::new(UiState {
             directory: vec!["aa", "bb"]
@@ -1694,56 +1377,6 @@ mod tests {
             );
             assert_eq!(list.focused_destination().as_deref(), Some("bb"));
             assert_eq!(list.list.value(), Some(FieldValue::Int(0)));
-        });
-    }
-
-    #[test]
-    fn send_acknowledgement_keeps_failed_or_newly_edited_text() {
-        let state = Rc::new(RefCell::new(UiState::default()));
-        let mut window = conversation_window(
-            Rect::new(0, 0, 100, 30),
-            state.clone(),
-            "aa".into(),
-            Rc::new(RefCell::new(None)),
-        );
-        *window.content.borrow_mut() = "draft".into();
-        with_context(|ctx| {
-            for error in [Some("offline".into()), None] {
-                state.borrow_mut().send_results.insert(
-                    "aa".into(),
-                    SendResult {
-                        content: "draft".into(),
-                        error: error.clone(),
-                    },
-                );
-                window.handle_event(
-                    &mut Event::Broadcast {
-                        command: REFRESH,
-                        source: None,
-                    },
-                    ctx,
-                );
-                assert_eq!(
-                    &*window.content.borrow(),
-                    if error.is_some() { "draft" } else { "" }
-                );
-            }
-            *window.content.borrow_mut() = "edited while sending".into();
-            state.borrow_mut().send_results.insert(
-                "aa".into(),
-                SendResult {
-                    content: "draft".into(),
-                    error: None,
-                },
-            );
-            window.handle_event(
-                &mut Event::Broadcast {
-                    command: REFRESH,
-                    source: None,
-                },
-                ctx,
-            );
-            assert_eq!(&*window.content.borrow(), "edited while sending");
         });
     }
 
@@ -1925,43 +1558,6 @@ mod tests {
         assert_eq!(
             merged.directory_views.get("node:0011"),
             Some(&vec!["Loaded page".into()])
-        );
-    }
-
-    #[test]
-    fn conversation_and_composer_dialogs_bind_selected_peer() {
-        let destination_hash = "aabbccddeeff00112233445566778899";
-        let state = Rc::new(RefCell::new(UiState {
-            conversations: vec![ConversationRow {
-                destination_hash: destination_hash.into(),
-                title: "Alice".into(),
-                label: "Alice".into(),
-                messages: vec!["[<] hello".into()],
-            }],
-            selected_destination_hash: Some(destination_hash.into()),
-            ..UiState::default()
-        }));
-
-        assert_eq!(
-            selected_destination(&state.borrow()).as_deref(),
-            Some(destination_hash)
-        );
-        let active_composer = Rc::new(RefCell::new(None));
-        let conversation = conversation_window(
-            Rect::new(0, 0, 100, 28),
-            state,
-            destination_hash.into(),
-            active_composer.clone(),
-        );
-        assert!(conversation.window.flags().grow);
-        assert!(conversation.window.flags().zoom);
-        assert!(conversation.content.borrow().is_empty());
-        assert_eq!(
-            active_composer
-                .borrow()
-                .as_ref()
-                .map(|(destination, _)| destination.as_str()),
-            Some(destination_hash)
         );
     }
 

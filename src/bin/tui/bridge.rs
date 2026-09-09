@@ -149,6 +149,22 @@ pub(super) async fn run(
             command = commands.recv() => {
                 let Some(command) = command else { break };
                 dirty = true;
+                if let UiCommand::ClearConversation { destination_hash, reply } = command {
+                    let result = if in_flight.contains(&format!("send:{destination_hash}")) {
+                        Err("Cannot clear history while sending a message".into())
+                    } else {
+                        service.clear_conversation(&destination_hash).map(|_| ()).map_err(|e| e.to_string())
+                    };
+                    if result.is_ok() {
+                        refresh_conversations(&service, &mut state);
+                        if let Some(limit) = opened.get_mut(&destination_hash) {
+                            *limit = 500;
+                            load_history(&service, &mut state, &destination_hash, *limit);
+                        }
+                    }
+                    let _ = reply.send(result);
+                    continue;
+                }
                 if let UiCommand::BrowserFetch(request) = command {
                     if jobs.len() >= 16 { request.reject("Too many pending requests; try again shortly"); }
                     else {
@@ -183,7 +199,7 @@ pub(super) async fn run(
                 let (key, destination) = match &command {
                     UiCommand::SendMessage { destination_hash, .. } => (format!("send:{destination_hash}"), destination_hash),
                     UiCommand::ConnectRrc { destination_hash } => (format!("rrc:{destination_hash}"), destination_hash),
-                    UiCommand::BrowserFetch(_) => unreachable!(),
+                    UiCommand::BrowserFetch(_) | UiCommand::ClearConversation { .. } => unreachable!(),
                     UiCommand::OpenConversation { .. } | UiCommand::CloseConversation { .. } | UiCommand::LoadOlder { .. } => unreachable!(),
                 };
                 if let UiCommand::ConnectRrc { .. } = &command {
@@ -224,7 +240,7 @@ pub(super) async fn run(
                             Completion::Hub(destination_hash, version, result)
                         });
                     }
-                    UiCommand::BrowserFetch(_) => unreachable!(),
+                    UiCommand::BrowserFetch(_) | UiCommand::ClearConversation { .. } => unreachable!(),
                     UiCommand::OpenConversation { .. } | UiCommand::CloseConversation { .. } | UiCommand::LoadOlder { .. } => unreachable!(),
                 }
             }
@@ -274,6 +290,78 @@ mod tests {
         })
         .await
         .expect("bridge update timed out")
+    }
+
+    #[tokio::test]
+    async fn clear_history_deletes_only_target_and_publishes_empty_history() {
+        let (_directory, core, service) = service();
+        let target = "aa".repeat(16);
+        let other = "bb".repeat(16);
+        for destination in [&target, &other] {
+            core.database
+                .store_message(rsnomadnet_core::db::NewMessage {
+                    destination_hash: destination,
+                    source_hash: destination,
+                    title: "",
+                    content: "old message",
+                    timestamp: 1,
+                    outbound: false,
+                    state: "delivered",
+                    delivery_method: "incoming",
+                    attempts: 0,
+                    next_attempt: 0,
+                    last_error: None,
+                    message_hash: None,
+                })
+                .unwrap();
+        }
+        let (sender, updates) = update_channel();
+        let (commands, receiver) = tokio::sync::mpsc::unbounded_channel();
+        let bridge = tokio::spawn(run(
+            service,
+            UiState::default(),
+            sender,
+            receiver,
+            core.events.subscribe(),
+        ));
+        commands
+            .send(UiCommand::OpenConversation {
+                destination_hash: target.clone(),
+            })
+            .unwrap();
+        next_matching(&updates, |state| {
+            state
+                .conversations
+                .iter()
+                .any(|row| row.destination_hash == target && !row.messages.is_empty())
+        })
+        .await;
+        let (reply, result) = tokio::sync::oneshot::channel();
+        commands
+            .send(UiCommand::ClearConversation {
+                destination_hash: target.clone(),
+                reply,
+            })
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(2), result)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        next_matching(&updates, |state| {
+            !state
+                .conversations
+                .iter()
+                .any(|row| row.destination_hash == target)
+        })
+        .await;
+        assert!(core.database.messages(&target).unwrap().is_empty());
+        assert_eq!(core.database.messages(&other).unwrap().len(), 1);
+        drop(commands);
+        tokio::time::timeout(Duration::from_secs(2), bridge)
+            .await
+            .unwrap()
+            .unwrap();
     }
 
     #[tokio::test]
