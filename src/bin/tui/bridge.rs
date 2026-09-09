@@ -83,6 +83,7 @@ pub(super) async fn run(
                             Ok(entries) => state.directory = directory_lines(entries),
                             Err(error) => state.network.push(format!("Directory: {error}")),
                         }
+                        refresh_conversations(&service, &mut state);
                     }
                     Ok(ServerEvent::MessageStored(message)) => {
                         refresh_conversations(&service, &mut state);

@@ -112,6 +112,9 @@ cargo run --features tui --bin nomadnet-tui -- --offline
 ```
 
 Select a peer in LXMF Conversations or Directory, then press `Enter`.
+The chat list shows the contact name, or the announced peer name when no contact
+name is set, falling back to the hex address. New announces update these names
+without changing the selected chat.
 This opens one conversation window containing scrollable message history and
 the new-message field; the selected peer is shown in its title. The window uses
 the blue palette, with a native splitter separating the resizable history pane

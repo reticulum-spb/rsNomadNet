@@ -492,7 +492,7 @@ mod tests {
         assert_eq!(list.focused_destination(), Some(format!("{:032x}", 2)));
         filters.0.set(15);
         list.handle_event(&mut refresh(), &mut ctx);
-        assert_eq!(list.row_ids.len(), 4);
+        assert_eq!(list.ids().len(), 4);
         assert_eq!(list.focused_destination(), Some(format!("{:032x}", 2)));
     }
 }
