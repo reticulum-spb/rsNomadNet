@@ -121,6 +121,15 @@ until the core confirms that the message was saved; failed sends keep the text
 and show an error in the conversation. In history, `PageUp` at the first row
 loads 500 older messages (up to 10,000 per open conversation). Directory shows
 the 200 most recent destinations and retains the selected entry during refresh.
+Directory has independent Peer (`Alt-P`), Propagation (`Alt-O`), RRC (`Alt-R`),
+and Node (`Alt-N`) checkboxes, all enabled initially. These shortcuts apply while
+Directory is active; the checkboxes also support mouse clicks and focused `Space`.
+The filters occupy a fixed one-line pane above the list, separated by a native
+TVision splitter joined to the window frame; the list pane grows with the window.
+The list has a vertical scrollbar. The mouse wheel scrolls the active Directory
+by three entries per step, including when focus was on its filter checkboxes.
+Filtering preserves the selected destination if it remains visible. Filters apply
+to the loaded 200 entries and are not saved in `tui.yaml`.
 Omit `--offline` to start the configured Reticulum interfaces.
 
 The Windows menu (`Alt-W`) opens Conversations, Network, and Directory. Selecting

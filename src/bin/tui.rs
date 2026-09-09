@@ -29,6 +29,8 @@ use updates::{UpdateReceiver, UpdateSender, update_channel};
 mod bridge;
 #[path = "tui/browser/mod.rs"]
 mod browser;
+#[path = "tui/directory.rs"]
+mod directory;
 #[path = "tui/layout.rs"]
 mod layout;
 #[path = "tui/windows.rs"]
@@ -96,6 +98,7 @@ struct DirectoryRow {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum DirectoryKind {
     Peer,
+    Propagation,
     Rrc,
     Node,
     Other,
@@ -321,16 +324,22 @@ struct StateList {
     pane: Pane,
     seeded: bool,
     row_ids: Vec<String>,
+    filters: Option<directory::Filters>,
 }
 
 impl StateList {
     fn new(bounds: Rect, state: Shared, pane: Pane) -> Self {
+        Self::with_scrollbar(bounds, state, pane, None)
+    }
+
+    fn with_scrollbar(bounds: Rect, state: Shared, pane: Pane, scrollbar: Option<ViewId>) -> Self {
         let mut view = Self {
-            list: ListBox::new(bounds, 1, None, None),
+            list: ListBox::new(bounds, 1, None, scrollbar),
             state,
             pane,
             seeded: false,
             row_ids: Vec::new(),
+            filters: None,
         };
         view.state_mut().grow_mode = GrowMode {
             hi_x: true,
@@ -351,6 +360,7 @@ impl StateList {
             Pane::Directory => state
                 .directory
                 .iter()
+                .filter(|entry| self.filters.as_ref().is_none_or(|f| f.includes(entry.kind)))
                 .map(|entry| entry.label.clone())
                 .collect(),
         }
@@ -374,25 +384,40 @@ impl StateList {
             Pane::Directory => state
                 .directory
                 .iter()
+                .filter(|entry| self.filters.as_ref().is_none_or(|f| f.includes(entry.kind)))
                 .map(|row| row.destination_hash.clone())
                 .collect(),
         }
     }
 
     fn focused_directory_kind(&self) -> Option<DirectoryKind> {
-        let FieldValue::Int(index) = self.list.value()? else {
-            return None;
-        };
+        let destination = self.focused_destination()?;
         self.state
             .borrow()
             .directory
-            .get(index as usize)
+            .iter()
+            .find(|entry| entry.destination_hash == destination)
             .map(|entry| entry.kind)
     }
 }
 
 #[delegate(to = list)]
 impl View for StateList {
+    fn apply_scroll_sync(&mut self, h: Option<i32>, v: Option<i32>, ctx: &mut Context) {
+        self.list.apply_scroll_sync(h, v, ctx);
+        // TVision defers ListBox's write-back to the next pump event. Flush it
+        // before another mouse event can change the scrollbar's value again.
+        ctx.put_event(Event::Nothing);
+        if self.list.state().state.focused {
+            if let Some(destination) = self.focused_destination() {
+                let mut state = self.state.borrow_mut();
+                state.selected_destination_hash = Some(destination.clone());
+                if matches!(self.pane, Pane::Directory) {
+                    state.selected_directory_hash = Some(destination);
+                }
+            }
+        }
+    }
     fn as_any_mut(&mut self) -> Option<&mut dyn core::any::Any> {
         Some(self)
     }
@@ -416,6 +441,7 @@ impl View for StateList {
                 self.seeded = true;
                 self.row_ids = ids;
                 self.list.new_list(lines, context);
+                tv::widgets::list_viewer::update_steps(&self.list, context);
                 if let Some(index) = index {
                     self.list
                         .set_value_ctx(FieldValue::Int(index as i32), context);
@@ -436,7 +462,7 @@ impl View for StateList {
                 self.state.borrow_mut().selected_directory_hash = Some(destination_hash);
             }
         }
-        if open && self.state.borrow().selected_destination_hash.is_some() {
+        if open && self.focused_destination().is_some() {
             let command = match self.pane {
                 Pane::Conversations => Some(OPEN_CONVERSATION),
                 Pane::Directory => match self.focused_directory_kind() {
@@ -647,6 +673,9 @@ impl TuiApp {
             };
             let mut window = Window::new(rect, Some(title.into()), number);
             window.state_mut().options.tileable = true;
+            if key == "directory" {
+                return Box::new(directory::window(window, state));
+            }
             let extent = window.state().get_extent();
             window.insert_child(Box::new(StateList::new(
                 Rect::new(1, 1, extent.b.x - 1, extent.b.y - 1),
@@ -1318,6 +1347,7 @@ fn directory_lines(entries: Vec<DirectoryEntry>) -> Vec<DirectoryRow> {
                 .unwrap_or_else(|| entry.destination_hash.clone()),
             kind: match entry.kind.as_str() {
                 "peer" => DirectoryKind::Peer,
+                "propagation" => DirectoryKind::Propagation,
                 "rrc" => DirectoryKind::Rrc,
                 "node" => DirectoryKind::Node,
                 _ => DirectoryKind::Other,
