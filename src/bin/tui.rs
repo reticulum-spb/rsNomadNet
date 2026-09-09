@@ -36,6 +36,9 @@ mod windows;
 use windows::{ManagedWindow, WindowRegistry};
 
 const REFRESH: Command = Command::custom("rsnomadnet.refresh");
+const OPEN_CONVERSATIONS: Command = Command::custom("rsnomadnet.open_conversations");
+const OPEN_NETWORK: Command = Command::custom("rsnomadnet.open_network");
+const OPEN_DIRECTORY: Command = Command::custom("rsnomadnet.open_directory");
 const OPEN_CONVERSATION: Command = Command::custom("rsnomadnet.open_conversation");
 const SEND_MESSAGE: Command = Command::custom("rsnomadnet.send_message");
 const LOAD_OLDER: Command = Command::custom("rsnomadnet.load_older");
@@ -598,6 +601,26 @@ impl TuiApp {
         bounds.a.y += 1;
         bounds.b.y -= 1;
         let mut desktop = Desktop::new(bounds, |rect| Some(Desktop::init_background(rect)));
+        // The pump remains alive even when every window has been closed.
+        desktop.insert_view(Box::new(PumpView::new(state.clone(), updates)));
+        for key in ["network", "directory", "conversations"] {
+            if saved
+                .as_ref()
+                .is_none_or(|s| s.windows.iter().any(|w| w.key == key))
+            {
+                desktop.insert_view(Box::new(layout::TrackedWindow::new(
+                    Self::main_window(bounds, state.clone(), key),
+                    key.into(),
+                    layout.clone(),
+                    saved.as_ref(),
+                    bounds,
+                )));
+            }
+        }
+        Some(Box::new(desktop))
+    }
+
+    fn main_window(bounds: Rect, state: Shared, key: &str) -> Box<dyn View> {
         let width = bounds.b.x - bounds.a.x;
         let height = bounds.b.y - bounds.a.y;
         let left = bounds.a.x + 1;
@@ -605,19 +628,33 @@ impl TuiApp {
         let middle = left + width / 2;
         let bottom = bounds.b.y - 1;
 
-        let mut conversations = Window::new(
-            Rect::new(left, top, middle, bottom),
-            Some("LXMF Conversations".into()),
-            1,
-        );
-        let extent = conversations.state().get_extent();
-        conversations.state_mut().options.tileable = true;
-        conversations.insert_child(Box::new(StateList::new(
-            Rect::new(1, 1, extent.b.x - 1, extent.b.y - 1),
-            state.clone(),
-            Pane::Conversations,
-        )));
         let split = top + height / 2;
+        if key != "network" {
+            let (rect, title, number, pane) = match key {
+                "conversations" => (
+                    Rect::new(left, top, middle, bottom),
+                    "LXMF Conversations",
+                    1,
+                    Pane::Conversations,
+                ),
+                "directory" => (
+                    Rect::new(middle, split, bounds.b.x - 1, bottom),
+                    "Directory",
+                    3,
+                    Pane::Directory,
+                ),
+                _ => unreachable!("unknown main window"),
+            };
+            let mut window = Window::new(rect, Some(title.into()), number);
+            window.state_mut().options.tileable = true;
+            let extent = window.state().get_extent();
+            window.insert_child(Box::new(StateList::new(
+                Rect::new(1, 1, extent.b.x - 1, extent.b.y - 1),
+                state,
+                pane,
+            )));
+            return Box::new(window);
+        }
         let mut network = Window::new(
             Rect::new(middle, top, bounds.b.x - 1, split),
             Some("Network".into()),
@@ -636,43 +673,7 @@ impl TuiApp {
             ..Default::default()
         };
         network.insert_child(Box::new(info));
-        let mut directory = Window::new(
-            Rect::new(middle, split, bounds.b.x - 1, bottom),
-            Some("Directory".into()),
-            3,
-        );
-        let extent = directory.state().get_extent();
-        directory.state_mut().options.tileable = true;
-        directory.insert_child(Box::new(StateList::new(
-            Rect::new(1, 1, extent.b.x - 1, extent.b.y - 1),
-            state.clone(),
-            Pane::Directory,
-        )));
-
-        // The pump belongs directly to the Desktop. Its pre-process flag then
-        // sees the first keyboard event regardless of which window is focused,
-        // so external results cannot remain queued behind a stale Loading view.
-        desktop.insert_view(Box::new(PumpView::new(state.clone(), updates)));
-        // Insert conversations last so it is initially focused without a saved layout.
-        for (key, view) in [
-            ("network", Box::new(network) as Box<dyn View>),
-            ("directory", Box::new(directory)),
-            ("conversations", Box::new(conversations)),
-        ] {
-            if saved
-                .as_ref()
-                .is_none_or(|s| s.windows.iter().any(|w| w.key == key))
-            {
-                desktop.insert_view(Box::new(layout::TrackedWindow::new(
-                    view,
-                    key.into(),
-                    layout.clone(),
-                    saved.as_ref(),
-                    bounds,
-                )));
-            }
-        }
-        Some(Box::new(desktop))
+        Box::new(network)
     }
 
     fn status_line(mut bounds: Rect) -> Option<Box<dyn View>> {
@@ -712,28 +713,32 @@ impl TuiApp {
                 menu.command_key("E~x~it", Command::QUIT, alt('x'), "Alt-X")
             })
             .submenu("~W~indows", alt('w'), |menu| {
-                menu.command_key(
-                    "~S~ize/Move",
-                    Command::RESIZE,
-                    window_key(Key::F(5), true, false, false),
-                    "Ctrl-F5",
-                )
-                .command_key("~Z~oom", Command::ZOOM, KeyEvent::from(Key::F(5)), "F5")
-                .command("~T~ile", Command::TILE)
-                .command("C~a~scade", Command::CASCADE)
-                .command_key("~N~ext", Command::NEXT, KeyEvent::from(Key::F(6)), "F6")
-                .command_key(
-                    "~P~revious",
-                    Command::PREV,
-                    window_key(Key::F(6), false, true, false),
-                    "Shift-F6",
-                )
-                .command_key(
-                    "~C~lose",
-                    Command::CLOSE,
-                    window_key(Key::F(3), false, false, true),
-                    "Alt-F3",
-                )
+                menu.command("C~o~nversations", OPEN_CONVERSATIONS)
+                    .command("N~e~twork", OPEN_NETWORK)
+                    .command("~D~irectory", OPEN_DIRECTORY)
+                    .separator()
+                    .command_key(
+                        "~S~ize/Move",
+                        Command::RESIZE,
+                        window_key(Key::F(5), true, false, false),
+                        "Ctrl-F5",
+                    )
+                    .command_key("~Z~oom", Command::ZOOM, KeyEvent::from(Key::F(5)), "F5")
+                    .command("~T~ile", Command::TILE)
+                    .command("C~a~scade", Command::CASCADE)
+                    .command_key("~N~ext", Command::NEXT, KeyEvent::from(Key::F(6)), "F6")
+                    .command_key(
+                        "~P~revious",
+                        Command::PREV,
+                        window_key(Key::F(6), false, true, false),
+                        "Shift-F6",
+                    )
+                    .command_key(
+                        "~C~lose",
+                        Command::CLOSE,
+                        window_key(Key::F(3), false, false, true),
+                        "Alt-F3",
+                    )
             })
             .build();
         Some(Box::new(MenuBar::new(bounds, menu)))
@@ -813,7 +818,23 @@ impl TuiApp {
             }
         }
         self.program.run_app(move |program, command| {
-            if command == LOAD_OLDER {
+            if let Some(key) = match command {
+                OPEN_CONVERSATIONS => Some("conversations"),
+                OPEN_NETWORK => Some("network"),
+                OPEN_DIRECTORY => Some("directory"),
+                _ => None,
+            } {
+                if !tracked.borrow_mut().focus_existing(key) {
+                    let bounds = program.desktop_rect();
+                    program.desktop_insert(Box::new(layout::TrackedWindow::new(
+                        Self::main_window(bounds, state.clone(), key),
+                        key.into(),
+                        tracked.clone(),
+                        None,
+                        bounds,
+                    )));
+                }
+            } else if command == LOAD_OLDER {
                 if let Some((destination_hash, _)) = active_composer.borrow().as_ref() {
                     let _ = commands.send(UiCommand::LoadOlder {
                         destination_hash: destination_hash.clone(),
@@ -1384,6 +1405,95 @@ fn main() -> anyhow::Result<()> {
 mod tests {
     use super::*;
     use tv::HeadlessBackend;
+
+    #[test]
+    fn main_windows_can_be_reopened_without_duplicates() {
+        let (backend, screen) = HeadlessBackend::new(100, 30);
+        let shared = Rc::new(RefCell::new(UiState::default()));
+        let (_sender, updates) = update_channel();
+        let mut app = TuiApp::with_layout(
+            Box::new(backend),
+            shared.clone(),
+            updates,
+            Some(layout::Layout::default()),
+        );
+        let (sender, _commands) = tokio::sync::mpsc::unbounded_channel();
+        for command in [
+            OPEN_CONVERSATIONS,
+            OPEN_CONVERSATIONS,
+            OPEN_NETWORK,
+            OPEN_NETWORK,
+            OPEN_DIRECTORY,
+            OPEN_DIRECTORY,
+            Command::CLOSE,
+            OPEN_DIRECTORY,
+            OPEN_DIRECTORY,
+            Command::QUIT,
+        ] {
+            screen.push_event(Event::Command(command));
+        }
+        app.run(shared, sender);
+        let saved = app.layout.borrow();
+        assert_eq!(saved.windows.len(), 3);
+        for key in ["conversations", "network", "directory"] {
+            assert_eq!(
+                saved
+                    .windows
+                    .iter()
+                    .filter(|window| window.key == key)
+                    .count(),
+                1
+            );
+        }
+    }
+
+    #[test]
+    fn windows_menu_opens_network_with_its_mnemonic() {
+        let (backend, screen) = HeadlessBackend::new(100, 30);
+        let shared = Rc::new(RefCell::new(UiState::default()));
+        let (_sender, updates) = update_channel();
+        let mut app = TuiApp::with_layout(
+            Box::new(backend),
+            shared.clone(),
+            updates,
+            Some(layout::Layout::default()),
+        );
+        let (sender, _commands) = tokio::sync::mpsc::unbounded_channel();
+        screen.push_key(
+            Key::Char('w'),
+            KeyModifiers {
+                alt: true,
+                ..Default::default()
+            },
+        );
+        screen.push_key(Key::Char('e'), KeyModifiers::default());
+        screen.push_event(Event::Command(Command::QUIT));
+        app.run(shared, sender);
+        assert_eq!(app.layout.borrow().windows.len(), 1);
+        assert_eq!(app.layout.borrow().windows[0].key, "network");
+    }
+
+    #[test]
+    fn existing_main_window_is_focused_without_changing_geometry() {
+        let (backend, _) = HeadlessBackend::new(100, 30);
+        let shared = Rc::new(RefCell::new(UiState::default()));
+        let (_sender, updates) = update_channel();
+        let mut app = TuiApp::new(Box::new(backend), shared, updates);
+        for _ in 0..8 {
+            app.program.pump_once();
+        }
+        let before = serde_yaml::to_string(&app.layout.borrow().windows).unwrap();
+        assert!(app.layout.borrow_mut().focus_existing("network"));
+        std::thread::sleep(Duration::from_millis(120));
+        for _ in 0..8 {
+            app.program.pump_once();
+        }
+        assert_eq!(app.layout.borrow().active.as_deref(), Some("network"));
+        assert_eq!(
+            serde_yaml::to_string(&app.layout.borrow().windows).unwrap(),
+            before
+        );
+    }
 
     fn with_context(run: impl FnOnce(&mut Context)) {
         let mut events = std::collections::VecDeque::new();

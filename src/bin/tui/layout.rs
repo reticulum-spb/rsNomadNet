@@ -20,6 +20,8 @@ pub(super) struct Layout {
     #[serde(default)]
     pub active: Option<String>,
     pub windows: Vec<SavedWindow>,
+    #[serde(skip)]
+    requested_focus: Option<String>,
 }
 
 impl Default for Layout {
@@ -28,6 +30,18 @@ impl Default for Layout {
             version: 1,
             active: None,
             windows: Vec::new(),
+            requested_focus: None,
+        }
+    }
+}
+
+impl Layout {
+    pub(super) fn focus_existing(&mut self, key: &str) -> bool {
+        if self.windows.iter().any(|window| window.key == key) {
+            self.requested_focus = Some(key.into());
+            true
+        } else {
+            false
         }
     }
 }
@@ -216,6 +230,15 @@ impl View for TrackedWindow {
         self.record();
     }
     fn handle_event(&mut self, event: &mut Event, ctx: &mut Context) {
+        {
+            let mut store = self.store.borrow_mut();
+            if store.requested_focus.as_deref() == Some(&self.key) {
+                store.requested_focus = None;
+                if let Some(id) = self.inner.state().id() {
+                    ctx.request_focus(id);
+                }
+            }
+        }
         if self.focus_on_start && matches!(event, Event::Timer(_)) {
             self.focus_on_start = false;
             if let Some(id) = self.state().id() {
@@ -259,6 +282,7 @@ mod tests {
             version: 1,
             active: Some("directory".into()),
             windows: vec![entry("directory")],
+            ..Default::default()
         };
         save(&path, &expected).unwrap();
         let actual = load(&path).unwrap().unwrap();
