@@ -107,7 +107,7 @@ pub fn restrict_file_permissions(path: &std::path::Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn restrict_directory_permissions(path: &std::path::Path) -> anyhow::Result<()> {
+pub(crate) fn restrict_directory_permissions(path: &std::path::Path) -> anyhow::Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;

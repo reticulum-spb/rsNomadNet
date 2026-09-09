@@ -33,6 +33,8 @@ mod browser;
 mod conversation;
 #[path = "tui/conversations.rs"]
 mod conversations;
+#[path = "tui/files.rs"]
+mod files;
 #[path = "tui/state_list.rs"]
 mod state_list;
 use conversation::{ActiveComposer, LOAD_OLDER, SEND_MESSAGE, window as conversation_window};
@@ -42,6 +44,8 @@ use state_list::StateList;
 mod directory;
 #[path = "tui/layout.rs"]
 mod layout;
+#[path = "tui/logging.rs"]
+mod logging;
 #[path = "tui/windows.rs"]
 mod windows;
 use windows::{ManagedWindow, WindowRegistry};
@@ -64,10 +68,14 @@ struct TuiCli {
     rns_config: Option<PathBuf>,
     #[arg(long)]
     state_dir: Option<PathBuf>,
+    /// Write diagnostic logs to a new file (never to the TUI terminal).
+    #[arg(long)]
+    log_file: Option<PathBuf>,
 }
 
 #[derive(Clone, Default)]
 struct UiState {
+    file_offers: Vec<rsnomadnet_core::attachments::FileOffer>,
     network: Vec<String>,
     conversations: Vec<ConversationRow>,
     directory: Vec<DirectoryRow>,
@@ -112,6 +120,16 @@ enum DirectoryKind {
 }
 
 enum UiCommand {
+    SendFile {
+        destination_hash: String,
+        path: PathBuf,
+        reply: tokio::sync::oneshot::Sender<Result<String, String>>,
+    },
+    DecideFile {
+        id: String,
+        accept: bool,
+        reply: tokio::sync::oneshot::Sender<Result<String, String>>,
+    },
     ClearConversation {
         destination_hash: String,
         reply: tokio::sync::oneshot::Sender<Result<(), String>>,
@@ -257,6 +275,7 @@ impl View for PumpView {
                 ..update
             };
             context.broadcast(REFRESH, None);
+            context.put_event(Event::Command(files::REVIEW));
         }
     }
 }
@@ -382,6 +401,7 @@ impl TuiApp {
         let definitions = StatusDef::list()
             .def_one_of([conversation::HELP], |definition| {
                 definition
+                    .item("~Ctrl-A~ Send file", None, files::SEND)
                     .item("~Ctrl-L~ Clear history", None, conversation::CLEAR_HISTORY)
                     .item("~Alt-X~ Exit", alt('x'), Command::QUIT)
                     .item("~F5~ Zoom", KeyEvent::from(Key::F(5)), Command::ZOOM)
@@ -529,7 +549,52 @@ impl TuiApp {
                 self.program.desktop_insert(Box::new(view));
             }
         }
+        let mut offered_files = std::collections::HashSet::new();
         self.program.run_app(move |program, command| {
+            if command == files::REVIEW {
+                let offers = state.borrow().file_offers.clone();
+                offered_files.retain(|id| offers.iter().any(|offer| &offer.id == id));
+                for offer in offers {
+                    if offered_files.insert(offer.id.clone()) {
+                        let bounds = program.desktop_rect();
+                        program.desktop_insert(Box::new(files::FileWindow::offer(
+                            bounds,
+                            offer,
+                            commands.clone(),
+                        )));
+                    }
+                }
+                return;
+            }
+            if command == files::SEND {
+                let destination = active_composer
+                    .borrow()
+                    .as_ref()
+                    .map(|(destination, _)| destination.clone());
+                if let Some(destination) = destination {
+                    if let Some(path) = program.open_file_dialog("Send LXMF file", "*") {
+                        let (reply, response) = tokio::sync::oneshot::channel();
+                        let name = path
+                            .file_name()
+                            .unwrap_or_default()
+                            .to_string_lossy()
+                            .into_owned();
+                        let _ = commands.send(UiCommand::SendFile {
+                            destination_hash: destination,
+                            path,
+                            reply,
+                        });
+                        let bounds = program.desktop_rect();
+                        program.desktop_insert(Box::new(files::FileWindow::sending(
+                            bounds,
+                            name,
+                            response,
+                            commands.clone(),
+                        )));
+                    }
+                }
+                return;
+            }
             if let Some(key) = match command {
                 OPEN_CONVERSATIONS => Some("conversations"),
                 OPEN_NETWORK => Some("network"),
@@ -898,6 +963,9 @@ fn directory_lines(entries: Vec<DirectoryEntry>) -> Vec<DirectoryRow> {
 
 fn main() -> anyhow::Result<()> {
     let cli = TuiCli::parse();
+    if let Some(path) = cli.log_file.as_deref() {
+        logging::init(path)?;
+    }
     let config = AppConfig::from_cli(Cli {
         listen: "127.0.0.1:8080".parse().expect("constant socket address"),
         allow_remote: false,

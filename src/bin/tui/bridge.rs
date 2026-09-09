@@ -2,6 +2,7 @@ use super::*;
 use std::collections::HashSet;
 
 enum Completion {
+    File,
     Sent(String, String, Result<(), String>),
     Hub(String, u64, Result<RrcHubView, String>),
     Browser,
@@ -64,10 +65,14 @@ pub(super) async fn run(
     let mut dirty = true;
     loop {
         tokio::select! {
-            _ = publish.tick(), if dirty => {
-                let _ = sender.send(state.clone());
-                state.send_results.clear();
-                dirty = false;
+            _ = publish.tick() => {
+                let offers = service.pending_files();
+                if offers != state.file_offers { state.file_offers = offers; dirty = true; }
+                if dirty {
+                    let _ = sender.send(state.clone());
+                    state.send_results.clear();
+                    dirty = false;
+                }
             }
             _ = refresh.tick() => {
                 state.network = network_lines(service.network_snapshot().await);
@@ -118,6 +123,7 @@ pub(super) async fn run(
             }
             completed = jobs.join_next(), if !jobs.is_empty() => {
                 match completed {
+                    Some(Ok(Completion::File)) => {}
                     Some(Ok(Completion::Sent(destination, content, result))) => {
                         in_flight.remove(&format!("send:{destination}"));
                         if result.is_ok() {
@@ -150,6 +156,30 @@ pub(super) async fn run(
             command = commands.recv() => {
                 let Some(command) = command else { break };
                 dirty = true;
+                if let UiCommand::SendFile { destination_hash, path, reply } = command {
+                    if jobs.len() >= 16 { let _ = reply.send(Err("Too many pending transfers".into())); }
+                    else {
+                        let service = service.clone();
+                        jobs.spawn(async move {
+                            let result = service.send_file(&destination_hash, path).await.map(|_| "File delivered".into()).map_err(|e| e.to_string());
+                            let _ = reply.send(result);
+                            Completion::File
+                        });
+                    }
+                    continue;
+                }
+                if let UiCommand::DecideFile { id, accept, reply } = command {
+                    if accept && jobs.len() >= 16 { let _ = reply.send(Err("Too many pending operations; try again".into())); }
+                    else {
+                        let service = service.clone();
+                        jobs.spawn(async move {
+                            let result = service.decide_file(id, accept).await.map(|path| path.map(|p| format!("Saved to {}", p.display())).unwrap_or_else(|| "File declined".into())).map_err(|e| e.to_string());
+                            let _ = reply.send(result);
+                            Completion::File
+                        });
+                    }
+                    continue;
+                }
                 if let UiCommand::ClearConversation { destination_hash, reply } = command {
                     let result = if in_flight.contains(&format!("send:{destination_hash}")) {
                         Err("Cannot clear history while sending a message".into())
@@ -200,7 +230,7 @@ pub(super) async fn run(
                 let (key, destination) = match &command {
                     UiCommand::SendMessage { destination_hash, .. } => (format!("send:{destination_hash}"), destination_hash),
                     UiCommand::ConnectRrc { destination_hash } => (format!("rrc:{destination_hash}"), destination_hash),
-                    UiCommand::BrowserFetch(_) | UiCommand::ClearConversation { .. } => unreachable!(),
+                    UiCommand::BrowserFetch(_) | UiCommand::ClearConversation { .. } | UiCommand::SendFile { .. } | UiCommand::DecideFile { .. } => unreachable!(),
                     UiCommand::OpenConversation { .. } | UiCommand::CloseConversation { .. } | UiCommand::LoadOlder { .. } => unreachable!(),
                 };
                 if let UiCommand::ConnectRrc { .. } = &command {
@@ -241,7 +271,7 @@ pub(super) async fn run(
                             Completion::Hub(destination_hash, version, result)
                         });
                     }
-                    UiCommand::BrowserFetch(_) | UiCommand::ClearConversation { .. } => unreachable!(),
+                    UiCommand::BrowserFetch(_) | UiCommand::ClearConversation { .. } | UiCommand::SendFile { .. } | UiCommand::DecideFile { .. } => unreachable!(),
                     UiCommand::OpenConversation { .. } | UiCommand::CloseConversation { .. } | UiCommand::LoadOlder { .. } => unreachable!(),
                 }
             }
@@ -358,6 +388,66 @@ mod tests {
         .await;
         assert!(core.database.messages(&target).unwrap().is_empty());
         assert_eq!(core.database.messages(&other).unwrap().len(), 1);
+        drop(commands);
+        tokio::time::timeout(Duration::from_secs(2), bridge)
+            .await
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn file_send_uses_direct_command_and_reports_failure_without_blocking_updates() {
+        let (_directory, core, service) = service();
+        core.network.write().await.state = NetworkState::Online;
+        let mut network_commands = core.network_command_rx.lock().await.take().unwrap();
+        let (sender, updates) = update_channel();
+        let (commands, receiver) = tokio::sync::mpsc::unbounded_channel();
+        let bridge = tokio::spawn(run(
+            service,
+            UiState::default(),
+            sender,
+            receiver,
+            core.events.subscribe(),
+        ));
+        let (reply, result) = tokio::sync::oneshot::channel();
+        commands
+            .send(UiCommand::SendFile {
+                destination_hash: "aa".repeat(16),
+                path: PathBuf::from("/tmp/selected.txt"),
+                reply,
+            })
+            .unwrap();
+        let NetworkCommand::SendFile {
+            destination_hash,
+            path,
+            response,
+        } = network_commands.recv().await.unwrap()
+        else {
+            panic!("wrong network command")
+        };
+        assert_eq!(destination_hash, [0xaa; 16]);
+        assert_eq!(path, PathBuf::from("/tmp/selected.txt"));
+        let mut snapshot = core.network.read().await.clone();
+        snapshot.detail = "Still processing events".into();
+        core.events
+            .send(ServerEvent::NetworkChanged(snapshot))
+            .unwrap();
+        next_matching(&updates, |state| {
+            state
+                .network
+                .iter()
+                .any(|line| line.contains("Still processing events"))
+        })
+        .await;
+        response.send(Err("peer unavailable".into())).unwrap();
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(2), result)
+                .await
+                .unwrap()
+                .unwrap(),
+            Err("peer unavailable".into())
+        );
+        assert!(core.database.conversations().unwrap().is_empty());
         drop(commands);
         tokio::time::timeout(Duration::from_secs(2), bridge)
             .await

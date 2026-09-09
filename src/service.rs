@@ -77,6 +77,63 @@ pub struct AppService {
 }
 
 impl AppService {
+    pub fn pending_files(&self) -> Vec<crate::attachments::FileOffer> {
+        self.state
+            .attachments
+            .lock()
+            .expect("attachments mutex poisoned")
+            .offers()
+    }
+
+    pub async fn decide_file(
+        &self,
+        id: String,
+        accept: bool,
+    ) -> AppResult<Option<std::path::PathBuf>> {
+        let state = self.state.clone();
+        tokio::task::spawn_blocking(move || {
+            let directory = state
+                .config
+                .database_path
+                .parent()
+                .ok_or_else(|| anyhow::anyhow!("missing state directory"))?
+                .join("files");
+            state
+                .attachments
+                .lock()
+                .expect("attachments mutex poisoned")
+                .decide(&id, accept, &directory)
+        })
+        .await
+        .map_err(|e| AppError::Internal(e.into()))?
+        .map_err(AppError::Internal)
+    }
+
+    pub async fn send_file(
+        &self,
+        destination: &str,
+        path: std::path::PathBuf,
+    ) -> AppResult<MessageView> {
+        let destination_hash = parse_hash(destination, "destination hash")?;
+        if !matches!(self.state.network.read().await.state, NetworkState::Online) {
+            return Err(AppError::Unavailable("Reticulum is not online".into()));
+        }
+        let (response, receiver) = oneshot::channel();
+        self.state
+            .network_commands
+            .send(NetworkCommand::SendFile {
+                destination_hash,
+                path,
+                response,
+            })
+            .await
+            .map_err(|_| AppError::Unavailable("network service is unavailable".into()))?;
+        receiver
+            .await
+            .map_err(|_| AppError::Unavailable("file transfer interrupted".into()))?
+            .map_err(AppError::Remote)
+    }
+
     pub fn new(state: Arc<AppState>) -> Self {
         Self { state }
     }

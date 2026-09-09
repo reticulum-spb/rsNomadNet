@@ -1,6 +1,7 @@
 #[cfg(feature = "web")]
 pub mod api;
 pub mod app;
+pub mod attachments;
 pub mod browser;
 pub mod config;
 pub mod db;

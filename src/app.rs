@@ -10,6 +10,7 @@ use crate::rrc::RrcCommand;
 use rns_runtime::lifecycle::ShutdownSignal;
 
 pub struct AppState {
+    pub(crate) attachments: std::sync::Mutex<crate::attachments::Inbox>,
     pub config: AppConfig,
     pub database: Database,
     pub network: RwLock<NetworkSnapshot>,
@@ -37,6 +38,7 @@ impl AppState {
             }
         };
         Self {
+            attachments: std::sync::Mutex::new(crate::attachments::Inbox::default()),
             config,
             database,
             network: RwLock::new(network),

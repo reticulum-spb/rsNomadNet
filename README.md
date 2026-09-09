@@ -125,6 +125,19 @@ the current input. Messages awaiting delivery prevent deletion. The shortcut
 is shown in the status line while the chat is active. Use `Alt-X` to
 leave the terminal frontend. Enter on an RRC hub or NomadNet node in Directory
 opens the corresponding hub or page-browser window.
+In a chat, `Ctrl-A` opens the file chooser and immediately sends the selected
+file using direct LXMF delivery, compatible with NomadNet file attachments.
+Files are read from their original paths into memory: there is no persistent
+file outbox, automatic retry, or restart recovery. Text drafts are unaffected.
+After an incoming attachment has arrived over the network, a non-modal window
+shows its filename, byte size and sender verification status. Accept saves it
+directly to `~/.rsNomadNet/files` (or `files` inside `--state-dir`); Decline or
+closing the offer discards it without writing to disk. Filename collisions
+produce a new name rather than overwriting existing files. Transport delivery
+confirmation is separate from the recipient's local save/decline decision.
+The safety limits are 16 MiB per file, 32 pending files and 64 MiB total pending
+data. Unanswered offers expire after 10 minutes and are lost on exit. File bytes
+are never stored in the database; only the normal chat record is retained.
 Reopening a target focuses its existing window. LXMF drafts remain in the input
 until the core confirms that the message was saved; failed sends keep the text
 and show an error in the conversation. In history, `PageUp` at the first row
@@ -195,6 +208,15 @@ To build the terminal frontend for an already running `rnsd-rs` shared instance:
 cargo build --no-default-features --features=reticulum-client,tui --bin nomadnet-tui
 ./target/debug/nomadnet-tui
 ```
+
+For network diagnostics, start the TUI with `--log-file /tmp/nomadnet-tui.log`.
+Choose a new filename each time: existing files (including symlinks) are refused,
+not overwritten. On Unix the log is created with owner-only permissions.
+Logs go to the file, never to the TUI terminal. The default filter includes Link
+and Resource diagnostics; `RUST_LOG` overrides it. Logs may contain peer/link
+identifiers, so review them before sharing. Logging is disabled by default;
+diagnostic files are not rotated and should only be enabled while reproducing
+an issue.
 
 The browser interface deliberately omits QR codes, BLE management, page
 hosting, and printing. Reticulum interfaces are exposed only as read-only

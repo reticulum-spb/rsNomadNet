@@ -245,6 +245,11 @@ impl View for ConversationWindow {
             self.clear_history();
             event.clear();
         }
+        if matches!(event, Event::KeyDown(key) if key.modifiers.ctrl && !key.modifiers.alt && matches!(key.key, Key::Char('a' | 'A')))
+        {
+            context.put_event(Event::Command(files::SEND));
+            event.clear();
+        }
         if matches!(event, Event::MouseWheel(_)) && !self.window.state().state.active {
             return;
         }

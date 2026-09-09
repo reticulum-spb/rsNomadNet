@@ -34,6 +34,11 @@ const MAX_PAGE_BYTES: usize = crate::browser::MAX_PAGE_BYTES;
 const MAX_DOWNLOAD_BYTES: usize = 64 * 1024 * 1024;
 
 pub enum NetworkCommand {
+    SendFile {
+        destination_hash: [u8; 16],
+        path: std::path::PathBuf,
+        response: oneshot::Sender<Result<MessageView, String>>,
+    },
     SetAnnounceName {
         name: Option<String>,
         announce_now: bool,
@@ -235,12 +240,14 @@ async fn run(state: Arc<AppState>) -> anyhow::Result<()> {
         tokio::select! {
             _ = state.shutdown.wait() => break,
             packet = packet_rx.recv() => {
-                if let Some((payload, _link_id)) = packet {
+                if let Some((payload, link_id)) = packet {
+                    tracing::debug!(link_id = %hex::encode(link_id), bytes = payload.len(), "inbound LXMF link packet");
                     receive_message(&state, &runtime, &payload).await;
                 }
             }
             resource = resource_rx.recv() => {
-                if let Some((payload, _link_id)) = resource {
+                if let Some((payload, link_id)) = resource {
+                    tracing::debug!(link_id = %hex::encode(link_id), bytes = payload.len(), "inbound LXMF resource completed");
                     receive_message(&state, &runtime, &payload).await;
                 }
             }
@@ -252,6 +259,20 @@ async fn run(state: Arc<AppState>) -> anyhow::Result<()> {
             command = command_rx.recv() => {
                 let Some(command) = command else { break };
                 match command {
+                    NetworkCommand::SendFile { destination_hash, path, response } => {
+                        if background_tasks.len() >= 16 {
+                            let _ = response.send(Err("Too many pending transfers".into()));
+                            continue;
+                        }
+                        let state = state.clone();
+                        let runtime = runtime.clone();
+                        background_tasks.spawn(async move {
+                            let result = tokio::time::timeout(Duration::from_secs(240), send_file_direct(&state, &runtime, &browser_private_key, destination_hash, path)).await
+                                .map_err(|_| "File transfer timed out".to_owned())
+                                .and_then(|r| r.map_err(|e| e.to_string()));
+                            let _ = response.send(result);
+                        });
+                    }
                     NetworkCommand::SetAnnounceName {
                         name,
                         announce_now,
@@ -750,14 +771,41 @@ async fn receive_message(
             .as_deref()
             .is_some_and(|hash| state.database.message_hash_exists(hash).unwrap_or(false))
         {
+            tracing::debug!("ignoring duplicate inbound LXMF message");
             return anyhow::Ok(());
         }
         let source_hash = hex::encode(message.source_hash);
+        let mut content = message.content.clone();
+        if !matches!(
+            message.unverified_reason,
+            Some(UnverifiedReason::SignatureInvalid)
+        ) {
+            match state
+                .attachments
+                .lock()
+                .expect("attachments mutex poisoned")
+                .receive(&message)
+            {
+                Ok(offers) => {
+                    tracing::debug!(count = offers.len(), "inbound LXMF file offers decoded");
+                    for offer in offers {
+                        content.push_str(&format!(
+                            "\n[File offered: {} ({} bytes)]",
+                            offer.name, offer.size
+                        ));
+                    }
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "inbound LXMF attachments rejected");
+                    content.push_str(&format!("\n[Attachments rejected: {error}]"));
+                }
+            }
+        }
         let stored = state.database.store_message(NewMessage {
             destination_hash: &source_hash,
             source_hash: &source_hash,
             title: &message.title,
-            content: &message.content,
+            content: &content,
             timestamp: message.timestamp as i64,
             outbound: false,
             state: verification_state,
@@ -1018,11 +1066,19 @@ async fn send_direct(
     title: &str,
     content: &str,
 ) -> anyhow::Result<()> {
+    let message = delivery.message(recipient, title, content, DeliveryMethod::Direct)?;
+    send_direct_payload(runtime, delivery, recipient, message.pack()?).await
+}
+
+async fn send_direct_payload(
+    runtime: &reticulum::ReticulumHandle,
+    delivery: &DeliveryIdentity,
+    recipient: [u8; 16],
+    payload: Vec<u8>,
+) -> anyhow::Result<()> {
     let remote = destination_identity(runtime, recipient).await?;
     let public_key = remote.get_public_key();
 
-    let message = delivery.message(recipient, title, content, DeliveryMethod::Direct)?;
-    let payload = message.pack()?;
     let private_key = delivery
         .identity()
         .get_private_key()
@@ -1042,6 +1098,63 @@ async fn send_direct(
         .await?;
     link.close().await?;
     Ok(())
+}
+
+async fn send_file_direct(
+    state: &Arc<AppState>,
+    runtime: &reticulum::ReticulumHandle,
+    private_key: &[u8],
+    recipient: [u8; 16],
+    path: std::path::PathBuf,
+) -> anyhow::Result<MessageView> {
+    let (name, data) =
+        tokio::task::spawn_blocking(move || crate::attachments::read_file(&path)).await??;
+    let delivery = DeliveryIdentity::new(
+        Identity::from_private_key(private_key)?,
+        Some("rsNomadNet".into()),
+        None,
+    )?;
+    let message = file_message(&delivery, recipient, &name, data)?;
+    let payload = message.pack()?;
+    send_direct_payload(runtime, &delivery, recipient, payload).await?;
+    let hash = message.hash.or(message.message_id).map(hex::encode);
+    let stored = state.database.store_message(NewMessage {
+        destination_hash: &hex::encode(recipient),
+        source_hash: &hex::encode(delivery.destination_hash()),
+        title: "",
+        content: &message.content,
+        timestamp: now_f64() as i64,
+        outbound: true,
+        state: "delivered",
+        delivery_method: "direct",
+        attempts: 1,
+        next_attempt: 0,
+        last_error: None,
+        message_hash: hash.as_deref(),
+    })?;
+    let _ = state
+        .events
+        .send(ServerEvent::MessageStored(stored.clone()));
+    Ok(stored)
+}
+
+fn file_message(
+    delivery: &DeliveryIdentity,
+    recipient: [u8; 16],
+    name: &str,
+    data: Vec<u8>,
+) -> anyhow::Result<LxMessage> {
+    let content = format!("File: {name} ({} bytes)", data.len());
+    let mut message = delivery.message(recipient, "", &content, DeliveryMethod::Direct)?;
+    crate::attachments::attach(&mut message, name, data)?;
+    // Fields must be included in both the signature and message hash.
+    message.sign(
+        &delivery
+            .identity()
+            .get_signing_key()
+            .ok_or_else(|| anyhow::anyhow!("local signing key unavailable"))?,
+    )?;
+    Ok(message)
 }
 
 async fn send_propagated(
@@ -1300,6 +1413,21 @@ async fn refresh_interfaces(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn outbound_file_has_native_lxmf_fields_and_valid_signature() {
+        use super::*;
+        let delivery = DeliveryIdentity::new(Identity::new(), None, None).unwrap();
+        let message =
+            file_message(&delivery, [42; 16], "note.txt", b"file payload".to_vec()).unwrap();
+        let mut decoded = LxMessage::unpack(&message.pack().unwrap()).unwrap();
+        let public = delivery.identity().get_signing_key().unwrap().public_key();
+        assert!(decoded.verify(&public));
+        let mut inbox = crate::attachments::Inbox::default();
+        let offers = inbox.receive(&decoded).unwrap();
+        assert_eq!(offers[0].name, "note.txt");
+        assert_eq!(offers[0].size, 12);
+        assert!(offers[0].verified);
+    }
     use super::*;
 
     #[test]
