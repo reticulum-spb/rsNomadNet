@@ -20,6 +20,8 @@ pub(super) struct Layout {
     #[serde(default)]
     pub active: Option<String>,
     pub windows: Vec<SavedWindow>,
+    #[serde(default)]
+    pub directory_filters: directory::Filters,
     #[serde(skip)]
     requested_focus: Option<String>,
 }
@@ -30,6 +32,7 @@ impl Default for Layout {
             version: 1,
             active: None,
             windows: Vec::new(),
+            directory_filters: directory::Filters::default(),
             requested_focus: None,
         }
     }

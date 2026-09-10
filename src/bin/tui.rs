@@ -299,6 +299,9 @@ impl TuiApp {
         saved: Option<layout::Layout>,
     ) -> Self {
         let layout = Rc::new(RefCell::new(layout::Layout::default()));
+        if let Some(saved) = &saved {
+            layout.borrow_mut().directory_filters = saved.directory_filters.clone();
+        }
         let tracked = layout.clone();
         let restore = saved.clone();
         let program = Program::new(
@@ -334,7 +337,7 @@ impl TuiApp {
                 .is_none_or(|s| s.windows.iter().any(|w| w.key == key))
             {
                 desktop.insert_view(Box::new(layout::TrackedWindow::new(
-                    Self::main_window(bounds, state.clone(), key),
+                    Self::main_window(bounds, state.clone(), key, &layout),
                     key.into(),
                     layout.clone(),
                     saved.as_ref(),
@@ -345,7 +348,12 @@ impl TuiApp {
         Some(Box::new(desktop))
     }
 
-    fn main_window(bounds: Rect, state: Shared, key: &str) -> Box<dyn View> {
+    fn main_window(
+        bounds: Rect,
+        state: Shared,
+        key: &str,
+        layout: &layout::Store,
+    ) -> Box<dyn View> {
         let width = bounds.b.x - bounds.a.x;
         let height = bounds.b.y - bounds.a.y;
         let left = bounds.a.x + 1;
@@ -371,7 +379,11 @@ impl TuiApp {
             let mut window = Window::new(rect, Some(title.into()), number);
             window.state_mut().options.tileable = true;
             if key == "directory" {
-                return Box::new(directory::window(window, state));
+                return Box::new(directory::window(
+                    window,
+                    state,
+                    layout.borrow().directory_filters.clone(),
+                ));
             }
             return Box::new(conversations::window(window, state));
         }
@@ -604,7 +616,7 @@ impl TuiApp {
                 if !tracked.borrow_mut().focus_existing(key) {
                     let bounds = program.desktop_rect();
                     program.desktop_insert(Box::new(layout::TrackedWindow::new(
-                        Self::main_window(bounds, state.clone(), key),
+                        Self::main_window(bounds, state.clone(), key, &tracked),
                         key.into(),
                         tracked.clone(),
                         None,

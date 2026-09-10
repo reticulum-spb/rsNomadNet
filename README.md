@@ -151,7 +151,10 @@ TVision splitter joined to the window frame; the list pane grows with the window
 The list has a vertical scrollbar. The mouse wheel scrolls the active Directory
 by three entries per step, including when focus was on its filter checkboxes.
 Filtering preserves the selected destination if it remains visible. Filters apply
-to the loaded 200 entries and are not saved in `tui.yaml`.
+to the loaded 200 entries. Their state is saved on normal exit in `tui.yaml`
+under `directory_filters` (`peer`, `propagation`, `rrc`, `node`) and restored on
+startup, even if Directory was closed at exit. Closing and reopening Directory
+also preserves the filters. Older layouts without these settings enable all four.
 Omit `--offline` to start the configured Reticulum interfaces.
 
 The Windows menu (`Alt-W`) opens Conversations, Network, and Directory. Selecting

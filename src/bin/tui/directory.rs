@@ -1,8 +1,51 @@
 use super::*;
 use std::cell::Cell;
 
-#[derive(Clone)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(from = "SavedFilters", into = "SavedFilters")]
 pub(super) struct Filters(Rc<Cell<u32>>);
+
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+struct SavedFilters {
+    peer: bool,
+    propagation: bool,
+    rrc: bool,
+    node: bool,
+}
+
+impl Default for SavedFilters {
+    fn default() -> Self {
+        Self {
+            peer: true,
+            propagation: true,
+            rrc: true,
+            node: true,
+        }
+    }
+}
+
+impl From<SavedFilters> for Filters {
+    fn from(value: SavedFilters) -> Self {
+        Self(Rc::new(Cell::new(
+            u32::from(value.peer)
+                | (u32::from(value.propagation) << 1)
+                | (u32::from(value.rrc) << 2)
+                | (u32::from(value.node) << 3),
+        )))
+    }
+}
+
+impl From<Filters> for SavedFilters {
+    fn from(value: Filters) -> Self {
+        Self {
+            peer: value.includes(DirectoryKind::Peer),
+            propagation: value.includes(DirectoryKind::Propagation),
+            rrc: value.includes(DirectoryKind::Rrc),
+            node: value.includes(DirectoryKind::Node),
+        }
+    }
+}
 
 impl Default for Filters {
     fn default() -> Self {
@@ -105,14 +148,13 @@ impl View for DirectoryWindow {
     }
 }
 
-pub(super) fn window(mut window: Window, state: Shared) -> DirectoryWindow {
+pub(super) fn window(mut window: Window, state: Shared, filters: Filters) -> DirectoryWindow {
     window.set_palette(WindowPalette::Blue);
     window.set_min_size(tv::Point::new(48, 8));
     let extent = window.state().get_extent();
     let interior = Rect::new(1, 1, extent.b.x - 1, extent.b.y - 1);
     let mut panels = tv::Splitter::rows().joined();
     panels.state_mut().options.first_click = true;
-    let filters = Filters::default();
     let mut boxes = tv::CheckBoxes::new(
         Rect::new(1, 1, extent.b.x - 1, 2),
         vec![
@@ -167,6 +209,85 @@ pub(super) fn window(mut window: Window, state: Shared) -> DirectoryWindow {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn filter_yaml_round_trips_every_combination_and_defaults_missing_fields() {
+        for bits in 0..16 {
+            let filters = Filters(Rc::new(Cell::new(bits)));
+            let yaml = serde_yaml::to_string(&filters).unwrap();
+            let restored: Filters = serde_yaml::from_str(&yaml).unwrap();
+            assert_eq!(restored.0.get(), bits);
+        }
+        let partial: Filters = serde_yaml::from_str("peer: false").unwrap();
+        assert_eq!(partial.0.get(), 0b1110);
+        let legacy: layout::Layout = serde_yaml::from_str("version: 1\nwindows: []").unwrap();
+        assert_eq!(legacy.directory_filters.0.get(), 15);
+    }
+
+    #[test]
+    fn keyboard_filters_are_saved_and_restored_in_directory() {
+        let (backend, screen) = tv::HeadlessBackend::new(100, 30);
+        let (_sender, updates) = update_channel();
+        let mut app = TuiApp::new(Box::new(backend), shared(), updates);
+        screen.push_key(
+            Key::Char('3'),
+            KeyModifiers {
+                alt: true,
+                ..Default::default()
+            },
+        );
+        for key in ['p', 'o', 'r', 'n'] {
+            screen.push_key(
+                Key::Char(key),
+                KeyModifiers {
+                    alt: true,
+                    ..Default::default()
+                },
+            );
+        }
+        for _ in 0..60 {
+            app.program.pump_once();
+        }
+        assert_eq!(app.layout.borrow().directory_filters.0.get(), 0);
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("tui.yaml");
+        layout::save(&path, &app.layout.borrow()).unwrap();
+        let saved = layout::load(&path).unwrap().unwrap();
+        let (backend, screen) = tv::HeadlessBackend::new(100, 30);
+        let (_sender, updates) = update_channel();
+        let mut restored = TuiApp::with_layout(Box::new(backend), shared(), updates, Some(saved));
+        assert_eq!(restored.layout.borrow().directory_filters.0.get(), 0);
+        screen.push_key(
+            Key::Char('3'),
+            KeyModifiers {
+                alt: true,
+                ..Default::default()
+            },
+        );
+        screen.push_key(
+            Key::Char('p'),
+            KeyModifiers {
+                alt: true,
+                ..Default::default()
+            },
+        );
+        for _ in 0..60 {
+            restored.program.pump_once();
+        }
+        assert_eq!(restored.layout.borrow().directory_filters.0.get(), 1);
+        // The setting is independent of whether Directory is open at exit.
+        restored.layout.borrow_mut().windows.clear();
+        layout::save(&path, &restored.layout.borrow()).unwrap();
+        assert_eq!(
+            layout::load(&path)
+                .unwrap()
+                .unwrap()
+                .directory_filters
+                .0
+                .get(),
+            1
+        );
+    }
 
     #[test]
     fn wheel_and_scrollbar_move_the_directory_list() {
