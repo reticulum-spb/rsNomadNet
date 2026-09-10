@@ -474,6 +474,25 @@ impl AppService {
         rrc_response(receiver).await
     }
 
+    pub async fn rrc_register(&self, destination_hash: &str, room: String) -> AppResult<()> {
+        self.require_online().await?;
+        let destination_hash = parse_hash(destination_hash, "hub hash")?;
+        let room = normalize_room(&room);
+        if room.is_empty() {
+            return Err(AppError::Invalid(
+                "Select a room or specify /register room".into(),
+            ));
+        }
+        let (response, receiver) = oneshot::channel();
+        self.send_rrc(RrcCommand::Register {
+            destination_hash,
+            room,
+            response,
+        })
+        .await?;
+        rrc_response(receiver).await
+    }
+
     pub async fn rrc_disconnect(&self, destination_hash: &str) -> AppResult<()> {
         let destination_hash = parse_hash(destination_hash, "hub hash")?;
         let (response, receiver) = oneshot::channel();

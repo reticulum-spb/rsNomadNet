@@ -10,6 +10,11 @@ use crate::models::{
 };
 
 pub enum RrcCommand {
+    Register {
+        destination_hash: [u8; 16],
+        room: String,
+        response: oneshot::Sender<Result<(), String>>,
+    },
     Connect {
         destination_hash: [u8; 16],
         nick: Option<String>,
@@ -122,7 +127,10 @@ pub fn spawn(
 fn is_remote_query(command: &RrcCommand) -> bool {
     matches!(
         command,
-        RrcCommand::ListRooms { .. } | RrcCommand::ListUsers { .. } | RrcCommand::Ping { .. }
+        RrcCommand::Join { .. }
+            | RrcCommand::ListRooms { .. }
+            | RrcCommand::ListUsers { .. }
+            | RrcCommand::Ping { .. }
     )
 }
 
@@ -133,6 +141,17 @@ async fn handle_command(
     command: RrcCommand,
 ) {
     match command {
+        RrcCommand::Register {
+            destination_hash,
+            room,
+            response,
+        } => {
+            let result = client
+                .register_room(destination_hash, &room, true)
+                .await
+                .map_err(|error| error.to_string());
+            let _ = response.send(result);
+        }
         RrcCommand::Connect {
             destination_hash,
             nick,
@@ -161,10 +180,17 @@ async fn handle_command(
             key,
             response,
         } => {
-            let result = client
-                .join(destination_hash, &room, key.as_deref())
-                .await
-                .map_err(|error| error.to_string());
+            // Queueing JOIN on the Link does not mean the hub accepted it.
+            // Run this as a query task so hub events continue reaching frontends.
+            let result = async {
+                client.join(destination_hash, &room, key.as_deref()).await?;
+                client
+                    .wait_until_joined(destination_hash, &room, std::time::Duration::from_secs(30))
+                    .await?;
+                Ok::<_, rs_rrc_client::Error>(())
+            }
+            .await
+            .map_err(|error| error.to_string());
             if result.is_ok()
                 && let Err(error) = database.save_rrc_room(
                     &hex::encode(destination_hash),
@@ -314,16 +340,9 @@ fn forward_event(state: &std::sync::Arc<AppState>, source: [u8; 16], event: Even
     let event = match event {
         Event::HubChanged(hub) => {
             let view = hub_view(hub, source);
-            if !view.connected
-                && matches!(
-                    state.database.is_rrc_hub_saved(&view.destination_hash),
-                    Ok(false)
-                )
-            {
-                None
-            } else {
-                Some(ServerEvent::RrcHubChanged(view))
-            }
+            // An explicit disconnect removes the saved profile before this
+            // queued event is handled. Still publish it to invalidate UI caches.
+            Some(ServerEvent::RrcHubChanged(view))
         }
         Event::Message(message) => {
             let message = message_view(message);
@@ -465,4 +484,54 @@ fn unix_seconds() -> i64 {
         .unwrap_or_default()
         .as_secs()
         .min(i64::MAX as u64) as i64
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn explicit_disconnect_is_published_after_profile_removal() {
+        let directory = tempfile::tempdir().unwrap();
+        let config = crate::config::AppConfig::from_cli(crate::config::Cli {
+            listen: "127.0.0.1:8080".parse().unwrap(),
+            allow_remote: false,
+            auth_token_file: None,
+            offline: true,
+            rns_config: None,
+            state_dir: Some(directory.path().into()),
+        })
+        .unwrap();
+        let state = std::sync::Arc::new(AppState::new(
+            config,
+            Database::open(std::path::Path::new(":memory:")).unwrap(),
+        ));
+        let hash = [7; 16];
+        let destination = hex::encode(hash);
+        state
+            .database
+            .save_rrc_hub(&destination, Some("Test"), None, 0)
+            .unwrap();
+        state.database.remove_rrc_hub(&destination).unwrap();
+        let mut events = state.events.subscribe();
+        forward_event(
+            &state,
+            [8; 16],
+            Event::HubChanged(Hub {
+                destination_hash: hash,
+                name: Some("Test".into()),
+                nick: None,
+                welcome: None,
+                connected: false,
+                rooms: Vec::new(),
+                public_rooms: Vec::new(),
+                room_states: Default::default(),
+                room_users: Default::default(),
+                detail: "Disconnected".into(),
+            }),
+        );
+        assert!(
+            matches!(events.try_recv(), Ok(ServerEvent::RrcHubChanged(hub)) if !hub.connected && hub.destination_hash == destination)
+        );
+    }
 }

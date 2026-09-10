@@ -70,6 +70,13 @@ pub(super) async fn run(
                 let offers = service.pending_files();
                 if offers != state.file_offers { state.file_offers = offers; dirty = true; }
                 if dirty {
+                    state.rrc_hubs = hubs.values().cloned().collect();
+                    state.rrc_hubs.sort_by(|a, b| a.destination_hash.cmp(&b.destination_hash));
+                    for hub in &state.rrc_hubs {
+                        if let Ok(history) = service.rrc_history(&hub.destination_hash, None) {
+                            state.rrc_history.insert(hub.destination_hash.clone(), history);
+                        }
+                    }
                     let _ = sender.send(state.clone());
                     state.send_results.clear();
                     dirty = false;
@@ -181,6 +188,14 @@ pub(super) async fn run(
                     });
                     continue;
                 }
+                if let UiCommand::Rrc(request) = command {
+                    if jobs.len() >= 16 { request.reject("Too many pending operations"); }
+                    else {
+                        let service = service.clone();
+                        jobs.spawn(async move { request.execute(service).await; Completion::File });
+                    }
+                    continue;
+                }
                 if let UiCommand::SendFile { destination_hash, path, reply } = command {
                     if jobs.len() >= 16 { let _ = reply.send(Err("Too many pending transfers".into())); }
                     else {
@@ -255,7 +270,7 @@ pub(super) async fn run(
                 let (key, destination) = match &command {
                     UiCommand::SendMessage { destination_hash, .. } => (format!("send:{destination_hash}"), destination_hash),
                     UiCommand::ConnectRrc { destination_hash } => (format!("rrc:{destination_hash}"), destination_hash),
-                    UiCommand::Announce { .. } | UiCommand::BrowserFetch(_) | UiCommand::ClearConversation { .. } | UiCommand::SendFile { .. } | UiCommand::DecideFile { .. } => unreachable!(),
+                    UiCommand::Rrc(_) | UiCommand::Announce { .. } | UiCommand::BrowserFetch(_) | UiCommand::ClearConversation { .. } | UiCommand::SendFile { .. } | UiCommand::DecideFile { .. } => unreachable!(),
                     UiCommand::OpenConversation { .. } | UiCommand::CloseConversation { .. } | UiCommand::LoadOlder { .. } => unreachable!(),
                 };
                 if let UiCommand::ConnectRrc { .. } = &command {
@@ -296,7 +311,7 @@ pub(super) async fn run(
                             Completion::Hub(destination_hash, version, result)
                         });
                     }
-                    UiCommand::Announce { .. } | UiCommand::BrowserFetch(_) | UiCommand::ClearConversation { .. } | UiCommand::SendFile { .. } | UiCommand::DecideFile { .. } => unreachable!(),
+                    UiCommand::Rrc(_) | UiCommand::Announce { .. } | UiCommand::BrowserFetch(_) | UiCommand::ClearConversation { .. } | UiCommand::SendFile { .. } | UiCommand::DecideFile { .. } => unreachable!(),
                     UiCommand::OpenConversation { .. } | UiCommand::CloseConversation { .. } | UiCommand::LoadOlder { .. } => unreachable!(),
                 }
             }
@@ -612,6 +627,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn register_service_dispatches_normalized_room_and_reports_failure() {
+        let (_directory, core, service) = service();
+        core.network.write().await.state = NetworkState::Online;
+        let mut commands = core.rrc_command_rx.lock().await.take().unwrap();
+        let task = tokio::spawn(async move {
+            service
+                .rrc_register(&"00".repeat(16), " #Rust ".into())
+                .await
+        });
+        let command = tokio::time::timeout(Duration::from_secs(2), commands.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let RrcCommand::Register {
+            destination_hash,
+            room,
+            response,
+        } = command
+        else {
+            panic!("wrong command")
+        };
+        assert_eq!(destination_hash, [0; 16]);
+        assert_eq!(room, "rust");
+        response.send(Err("registration rejected".into())).unwrap();
+        assert!(
+            task.await
+                .unwrap()
+                .unwrap_err()
+                .to_string()
+                .contains("registration rejected")
+        );
+    }
+
+    #[tokio::test]
     async fn late_connect_reply_does_not_overwrite_welcome() {
         let (_directory, core, service) = service();
         core.network.write().await.state = NetworkState::Online;
@@ -657,6 +706,26 @@ mod tests {
         assert!(
             rrc_commands.try_recv().is_err(),
             "connected hub must be reused"
+        );
+        core.events
+            .send(ServerEvent::RrcHubChanged(hub(false)))
+            .unwrap();
+        next_matching(&updates, |update| {
+            update.rrc_hubs.iter().any(|h| !h.connected)
+        })
+        .await;
+        commands
+            .send(UiCommand::ConnectRrc {
+                destination_hash: "00".repeat(16),
+            })
+            .unwrap();
+        let reconnect = tokio::time::timeout(Duration::from_secs(2), rrc_commands.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            matches!(reconnect, RrcCommand::Connect { .. }),
+            "offline hub must reconnect instead of reusing stale state"
         );
         bridge.abort();
         let _ = bridge.await;

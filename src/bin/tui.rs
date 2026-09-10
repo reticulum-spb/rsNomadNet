@@ -12,12 +12,13 @@ use rsnomadnet_core::models::{
     ConversationSummary, DirectoryEntry, NetworkSnapshot, RrcHubView, RrcMessageView, ServerEvent,
 };
 use rsnomadnet_core::service::{AppService, FetchPage, SendMessage};
+use tv::WindowFlags;
 use tv::window::WindowPalette;
 use tv::{
     Backend, Button, ButtonFlags, Command, Context, CrosstermBackend, Desktop, Dialog, DrawCtx,
     Event, FieldValue, GrowMode, InputLine, Key, ListBox, Menu, MenuBar, Program, Rect, ScrollBar,
-    StaticText, StatusDef, StatusLine, SystemClock, Theme, View, ViewId, ViewState, Window,
-    WindowFlags, alt, delegate,
+    StaticText, StatusDef, StatusLine, SystemClock, Theme, View, ViewId, ViewState, Window, alt,
+    delegate,
 };
 use tv::{KeyEvent, KeyModifiers};
 use tvision_rs as tv;
@@ -35,6 +36,9 @@ mod conversation;
 mod conversations;
 #[path = "tui/files.rs"]
 mod files;
+#[path = "tui/rrc.rs"]
+mod rrc;
+use rrc::{hub_lines as rrc_hub_lines, message_line as rrc_message_line};
 #[path = "tui/state_list.rs"]
 mod state_list;
 use conversation::{ActiveComposer, LOAD_OLDER, SEND_MESSAGE, window as conversation_window};
@@ -78,6 +82,9 @@ struct TuiCli {
 
 #[derive(Clone, Default)]
 struct UiState {
+    rrc_focus: Option<String>,
+    rrc_hubs: Vec<RrcHubView>,
+    rrc_history: HashMap<String, Vec<RrcMessageView>>,
     announce_name: String,
     announce_status: String,
     file_offers: Vec<rsnomadnet_core::attachments::FileOffer>,
@@ -126,6 +133,7 @@ enum DirectoryKind {
 }
 
 enum UiCommand {
+    Rrc(rrc::Request),
     Announce {
         name: Option<String>,
     },
@@ -298,8 +306,10 @@ impl View for PumpView {
             let pending_sends = current.pending_sends.clone();
             let send_errors = current.send_errors.clone();
             let drafts = current.drafts.clone();
+            let rrc_focus = current.rrc_focus.clone();
             drop(current);
             *self.shared.borrow_mut() = UiState {
+                rrc_focus,
                 selected_destination_hash: selected,
                 directory_views,
                 send_results,
@@ -447,6 +457,17 @@ impl TuiApp {
     fn status_line(mut bounds: Rect) -> Option<Box<dyn View>> {
         bounds.a.y = bounds.b.y - 1;
         let definitions = StatusDef::list()
+            .def_one_of([rrc::HELP], |definition| {
+                definition
+                    .item("~Ctrl-L~ Clear history", None, rrc::CLEAR)
+                    .item("~F9~ Announce", KeyEvent::from(Key::F(9)), ANNOUNCE)
+                    .item("~Alt-X~ Exit", alt('x'), Command::QUIT)
+                    .item("~F5~ Zoom", KeyEvent::from(Key::F(5)), Command::ZOOM)
+                    .item("~F6~ Next", KeyEvent::from(Key::F(6)), Command::NEXT)
+                    .key_item(window_key(Key::F(5), true, false, false), Command::RESIZE)
+                    .key_item(window_key(Key::F(6), false, true, false), Command::PREV)
+                    .key_item(window_key(Key::F(3), false, false, true), Command::CLOSE)
+            })
             .def_one_of([NETWORK_HELP], |definition| {
                 definition
                     .item(
@@ -554,6 +575,10 @@ impl TuiApp {
                 let Some((kind, hash)) = entry.key.split_once(':') else {
                     continue;
                 };
+                // Older layouts may contain one RRC window per server.
+                if kind == "rrc" && windows.borrow_mut().focus_rrc() {
+                    continue;
+                }
                 let bounds = self.program.desktop_rect();
                 let mut pending = None;
                 let view: Box<dyn View> = match kind {
@@ -588,13 +613,7 @@ impl TuiApp {
                                 destination_hash: hash.into(),
                             },
                         ));
-                        Box::new(directory_target_window(
-                            bounds,
-                            state.clone(),
-                            hash,
-                            "RRC Hub",
-                            entry.key.clone(),
-                        ))
+                        Box::new(rrc::window(bounds, state.clone(), hash, commands.clone()))
                     }
                     _ => continue,
                 };
@@ -736,6 +755,11 @@ impl TuiApp {
                 let Some(destination_hash) = selected_destination(&state.borrow()) else {
                     return;
                 };
+                if command == OPEN_RRC_HUB && windows.borrow_mut().focus_rrc() {
+                    state.borrow_mut().rrc_focus = Some(destination_hash.clone());
+                    let _ = commands.send(UiCommand::ConnectRrc { destination_hash });
+                    return;
+                }
                 let bounds = program.desktop_rect();
                 let key = format!(
                     "{}:{destination_hash}",
@@ -746,6 +770,17 @@ impl TuiApp {
                     }
                 );
                 if windows.borrow_mut().focus_existing(&key) {
+                    if command == OPEN_RRC_HUB
+                        && !state
+                            .borrow()
+                            .rrc_hubs
+                            .iter()
+                            .any(|hub| hub.destination_hash == destination_hash && hub.connected)
+                    {
+                        let _ = commands.send(UiCommand::ConnectRrc {
+                            destination_hash: destination_hash.clone(),
+                        });
+                    }
                     return;
                 }
                 let view: Box<dyn View> = if command == OPEN_NODE_BROWSER {
@@ -763,12 +798,11 @@ impl TuiApp {
                     let _ = commands.send(UiCommand::ConnectRrc {
                         destination_hash: destination_hash.clone(),
                     });
-                    Box::new(directory_target_window(
+                    Box::new(rrc::window(
                         bounds,
                         state.clone(),
                         &destination_hash,
-                        "RRC Hub",
-                        key.clone(),
+                        commands.clone(),
                     ))
                 };
                 let view = Box::new(ManagedWindow::new(
@@ -789,42 +823,7 @@ impl TuiApp {
     }
 }
 
-fn directory_target_window(
-    desktop: Rect,
-    state: Shared,
-    destination_hash: &str,
-    kind_title: &str,
-    key: String,
-) -> Dialog {
-    let width = 64.min(desktop.b.x - desktop.a.x - 2).max(36);
-    let height = 18.min(desktop.b.y - desktop.a.y - 2).max(10);
-    let left = desktop.a.x + ((desktop.b.x - desktop.a.x - width) / 2).max(0);
-    let top = desktop.a.y + ((desktop.b.y - desktop.a.y - height) / 2).max(0);
-    let mut window = Dialog::new(
-        Rect::new(left, top, left + width, top + height),
-        Some(format!(
-            "{kind_title} — {}",
-            directory_title(&state.borrow(), destination_hash)
-        )),
-    );
-    window.set_flags(WindowFlags {
-        r#move: true,
-        grow: true,
-        close: true,
-        zoom: true,
-    });
-    let extent = window.state().get_extent();
-    let mut view =
-        DirectoryTargetView::new(Rect::new(1, 1, extent.b.x - 1, extent.b.y - 1), state, key);
-    view.state_mut().grow_mode = GrowMode {
-        hi_x: true,
-        hi_y: true,
-        ..Default::default()
-    };
-    window.insert_child(Box::new(view));
-    window
-}
-
+#[cfg(test)]
 struct DirectoryTargetView {
     list: ListBox,
     state: Shared,
@@ -832,6 +831,7 @@ struct DirectoryTargetView {
     seeded: bool,
 }
 
+#[cfg(test)]
 impl DirectoryTargetView {
     fn new(bounds: Rect, state: Shared, key: String) -> Self {
         Self {
@@ -853,6 +853,7 @@ impl DirectoryTargetView {
 }
 
 #[delegate(to = list)]
+#[cfg(test)]
 impl View for DirectoryTargetView {
     fn as_any_mut(&mut self) -> Option<&mut dyn core::any::Any> {
         Some(self)
@@ -948,52 +949,6 @@ async fn snapshot(service: &AppService) -> UiState {
         directory_views: HashMap::new(),
         selected_destination_hash: None,
         ..UiState::default()
-    }
-}
-
-fn rrc_hub_lines(service: &AppService, hub: RrcHubView) -> Vec<String> {
-    let destination_hash = hub.destination_hash.clone();
-    let mut lines = vec![
-        format!(
-            "State: {}",
-            if hub.connected {
-                "connected"
-            } else {
-                "offline"
-            }
-        ),
-        format!("Identity: {}", hub.local_identity),
-        format!("Nick: {}", hub.nick.as_deref().unwrap_or("-")),
-        hub.detail,
-    ];
-    if hub.rooms.is_empty() {
-        lines.push("Rooms: none".into());
-    } else {
-        lines.push("Rooms:".into());
-        lines.extend(hub.rooms.into_iter().map(|room| format!("  {room}")));
-    }
-    let history = service
-        .rrc_history(&destination_hash, None)
-        .unwrap_or_default();
-    if !history.is_empty() {
-        lines.push(String::new());
-        lines.push("Messages:".into());
-        lines.extend(history.into_iter().map(rrc_message_line));
-    }
-    lines
-}
-
-fn rrc_message_line(message: RrcMessageView) -> String {
-    let room = message
-        .room
-        .as_deref()
-        .map(|room| format!("#{room} "))
-        .unwrap_or_default();
-    let nick = message.nick.as_deref().unwrap_or(&message.source_hash);
-    if message.kind == "action" {
-        format!("[{room}* {nick}] {}", message.body)
-    } else {
-        format!("[{room}{nick}] {}", message.body)
     }
 }
 
@@ -1575,6 +1530,57 @@ mod tests {
     }
 
     #[test]
+    fn directory_opens_new_server_in_existing_rrc_window() {
+        let (backend, screen) = HeadlessBackend::new(100, 30);
+        let hashes = ["aa".repeat(16), "bb".repeat(16)];
+        let state = Rc::new(RefCell::new(UiState {
+            directory: hashes
+                .iter()
+                .enumerate()
+                .map(|(i, hash)| DirectoryRow {
+                    destination_hash: hash.clone(),
+                    title: format!("Server {i}"),
+                    label: format!("Server {i}"),
+                    kind: DirectoryKind::Rrc,
+                })
+                .collect(),
+            ..Default::default()
+        }));
+        let (_sender, updates) = update_channel();
+        let (commands, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = TuiApp::new(Box::new(backend), state.clone(), updates);
+        for second in [false, true] {
+            screen.push_key(
+                Key::Char('3'),
+                KeyModifiers {
+                    alt: true,
+                    ..Default::default()
+                },
+            );
+            if second {
+                screen.push_key(Key::Down, KeyModifiers::default());
+            }
+            screen.push_key(Key::Enter, KeyModifiers::default());
+        }
+        screen.push_event(Event::Command(Command::QUIT));
+        app.run(state, commands);
+        for hash in hashes {
+            assert!(
+                matches!(receiver.try_recv(), Ok(UiCommand::ConnectRrc { destination_hash }) if destination_hash == hash)
+            );
+        }
+        assert_eq!(
+            app.layout
+                .borrow()
+                .windows
+                .iter()
+                .filter(|w| w.key.starts_with("rrc:"))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
     fn enter_on_rrc_directory_entry_opens_hub_window() {
         let destination_hash = "00112233445566778899aabbccddeeff";
         let (backend, screen) = HeadlessBackend::new(100, 30);
@@ -1842,7 +1848,7 @@ mod tests {
     }
 
     #[test]
-    fn rrc_messages_include_room_and_nick() {
+    fn rrc_messages_include_only_nick_and_body() {
         assert_eq!(
             rrc_message_line(RrcMessageView {
                 hub_hash: "0011".into(),
@@ -1853,7 +1859,7 @@ mod tests {
                 timestamp_ms: 0,
                 kind: "action".into(),
             }),
-            "[#general * Alice] waves"
+            "Alice: waves"
         );
     }
 }

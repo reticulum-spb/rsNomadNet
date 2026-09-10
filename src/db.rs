@@ -549,7 +549,8 @@ impl Database {
         let connection = self.connection.lock().expect("database mutex poisoned");
         connection
             .execute(
-                "DELETE FROM rrc_messages WHERE hub_hash = ?1 AND room = ?2",
+                // Room history also displays the hub's unscoped message stream.
+                "DELETE FROM rrc_messages WHERE hub_hash = ?1 AND (room = ?2 OR room IS NULL)",
                 params![hub_hash, room],
             )
             .map_err(Into::into)
@@ -1666,6 +1667,36 @@ mod tests {
             database.operational_error_count().unwrap(),
             OPERATIONAL_ERRORS_LIMIT
         );
+    }
+
+    #[test]
+    fn clearing_rrc_room_also_clears_hub_notices_but_preserves_other_rooms_and_hubs() {
+        let database = Database::open(Path::new(":memory:")).unwrap();
+        for (hub, room) in [
+            ("aa", Some("rust")),
+            ("aa", Some("bots")),
+            ("aa", None),
+            ("cc", None),
+            ("cc", Some("rust")),
+        ] {
+            database
+                .store_rrc_message(&RrcMessageView {
+                    hub_hash: hub.into(),
+                    room: room.map(str::to_string),
+                    source_hash: hub.into(),
+                    nick: None,
+                    body: "message".into(),
+                    timestamp_ms: 10,
+                    kind: "notice".into(),
+                })
+                .unwrap();
+        }
+        assert_eq!(database.clear_rrc_messages("aa", "rust").unwrap(), 2);
+        let remaining = database.rrc_messages("aa", None).unwrap();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].room.as_deref(), Some("bots"));
+        assert_eq!(database.rrc_messages("cc", None).unwrap().len(), 2);
+        assert_eq!(database.clear_rrc_messages("aa", "rust").unwrap(), 0);
     }
 
     #[test]

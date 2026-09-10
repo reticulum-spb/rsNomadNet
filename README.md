@@ -125,6 +125,36 @@ the current input. Messages awaiting delivery prevent deletion. The shortcut
 is shown in the status line while the chat is active. Use `Alt-X` to
 leave the terminal frontend. Enter on an RRC hub or NomadNet node in Directory
 opens the corresponding hub or page-browser window.
+RRC uses a blue split-pane window: connected servers on the left, Disconnect and
+Rooms buttons below them, and a horizontal radio-button strip on a gray background, room history with
+a scrollbar, and message input on the right. Rooms requests the server's room
+list; selecting a room sends Join only if it has not already been joined.
+Joined rooms switch locally. The current confirmed room is marked. Inactive
+rooms show new-message counts as `room (3)`; opening the room clears its count.
+These counts are kept for the lifetime of the window. Use Tab/Shift-Tab to move between controls
+and reach room buttons outside the visible strip. Enter in the input sends text
+to the selected room. Supported commands: `/join room [key]`, `/part [room]`,
+`/register [room]`, `/nick name`, `/rooms`, `/users [room]`, `/ping`, `/disconnect`, and `/me text`.
+`/register` uses the selected room when no name is provided; server permissions
+still apply. Sending the registration request does not imply server approval.
+Requests run asynchronously; failures retain the draft. Drafts are separate per
+server and room for the lifetime of the window. Closing the window does not
+disconnect the servers; use Disconnect explicitly.
+Only one RRC window is opened: choosing another RRC server in Directory connects
+it and selects it in the existing window. Legacy layouts with several RRC windows
+restore a single window. `Ctrl-L` clears the locally stored history of the selected
+room on the selected server, including that server's shared messages without a
+room. Messages assigned to other rooms, other servers, and the input draft are unchanged.
+The shortcut is shown in the status line while RRC is active.
+History rows contain only `sender: message`. Sender names longer than 15
+characters are shortened to the first eight and last four, separated by `...`.
+Command status occupies one line below the left-hand buttons, without a separate
+panel or room label. Messages from the hub itself show only their body.
+The room strip is one row high. Successful Disconnect clears its room names and
+the visible message history without deleting stored messages.
+Enter on an offline server reconnects it; reopening its existing window from
+Directory also reconnects. JOIN waits for the hub's joined-room confirmation
+(up to 30 seconds) before selecting the room and clearing the input.
 In a chat, `Ctrl-A` opens the file chooser and immediately sends the selected
 file using direct LXMF delivery, compatible with NomadNet file attachments.
 Files are read from their original paths into memory: there is no persistent

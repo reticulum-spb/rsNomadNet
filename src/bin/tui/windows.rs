@@ -8,6 +8,19 @@ pub(super) struct WindowRegistry {
 }
 
 impl WindowRegistry {
+    pub(super) fn focus_rrc(&mut self) -> bool {
+        if let Some(key) = self
+            .keys
+            .iter()
+            .find(|key| key.starts_with("rrc:"))
+            .cloned()
+        {
+            self.focus = Some(key);
+            true
+        } else {
+            false
+        }
+    }
     pub(super) fn focus_existing(&mut self, key: &str) -> bool {
         if self.keys.contains(key) {
             self.focus = Some(key.into());
