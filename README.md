@@ -164,6 +164,13 @@ The same menu provides Size/Move (`Ctrl-F5`), Zoom (`F5`),
 Tile, Cascade, Next (`F6`), Previous (`Shift-F6`), and Close (`Alt-F3`).
 In Size/Move mode use arrows to move, Shift-arrows to resize, Enter to accept,
 or Escape to cancel. Network is a gray information window without scrolling.
+Interface RX/TX counters use KB (1024 bytes) with two decimal places. Their columns
+align at the right edge and follow window resizing; long interface names are clipped.
+In Network, `Ctrl-N` edits the LXMF announce name. Confirming with OK saves it in
+the shared identity settings and sends an announce; Cancel leaves it unchanged.
+`F9` sends an announce with the saved name from any window. Both shortcuts appear
+in the relevant status lines. Network displays the result, including offline errors;
+an edited name is still saved when offline and used at the next network startup.
 
 On normal exit (`Alt-X`), the TUI saves open windows, their positions and sizes,
 the active window, and each Browser's current address to `~/.rsNomadNet/tui.yaml`.

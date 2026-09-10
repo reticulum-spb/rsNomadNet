@@ -51,6 +51,9 @@ mod windows;
 use windows::{ManagedWindow, WindowRegistry};
 
 const REFRESH: Command = Command::custom("rsnomadnet.refresh");
+const ANNOUNCE: Command = Command::custom("rsnomadnet.announce");
+const RENAME: Command = Command::custom("rsnomadnet.rename");
+const NETWORK_HELP: tv::help::HelpCtx = tv::help::HelpCtx::custom("rsnomadnet.network");
 const OPEN_CONVERSATIONS: Command = Command::custom("rsnomadnet.open_conversations");
 const OPEN_NETWORK: Command = Command::custom("rsnomadnet.open_network");
 const OPEN_DIRECTORY: Command = Command::custom("rsnomadnet.open_directory");
@@ -75,8 +78,11 @@ struct TuiCli {
 
 #[derive(Clone, Default)]
 struct UiState {
+    announce_name: String,
+    announce_status: String,
     file_offers: Vec<rsnomadnet_core::attachments::FileOffer>,
     network: Vec<String>,
+    network_interfaces: Vec<rsnomadnet_core::models::InterfaceSnapshot>,
     conversations: Vec<ConversationRow>,
     directory: Vec<DirectoryRow>,
     directory_views: HashMap<String, Vec<String>>,
@@ -120,6 +126,9 @@ enum DirectoryKind {
 }
 
 enum UiCommand {
+    Announce {
+        name: Option<String>,
+    },
     SendFile {
         destination_hash: String,
         path: PathBuf,
@@ -166,10 +175,36 @@ struct NetworkInfo {
     shared: Shared,
 }
 
+struct NetworkWindow {
+    window: Window,
+}
+
+#[delegate(to = window)]
+impl View for NetworkWindow {
+    fn get_help_ctx(&self) -> tv::help::HelpCtx {
+        NETWORK_HELP
+    }
+    fn handle_event(&mut self, event: &mut Event, ctx: &mut Context) {
+        if let Event::KeyDown(key) = event {
+            if key.modifiers.ctrl && !key.modifiers.alt && matches!(key.key, Key::Char('n' | 'N')) {
+                ctx.put_event(Event::Command(RENAME));
+                event.clear();
+                return;
+            }
+        }
+        self.window.handle_event(event, ctx);
+    }
+}
+
 #[delegate(to = text)]
 impl View for NetworkInfo {
+    fn get_help_ctx(&self) -> tv::help::HelpCtx {
+        NETWORK_HELP
+    }
     fn draw(&mut self, context: &mut DrawCtx) {
-        self.text.set_text(self.shared.borrow().network.join("\n"));
+        let width = self.text.state().get_extent().b.x.max(0) as usize;
+        let state = self.shared.borrow();
+        self.text.set_text(network_text(&state, width));
         self.text.draw(context);
     }
 }
@@ -393,6 +428,7 @@ impl TuiApp {
             2,
         );
         network.set_palette(WindowPalette::Gray);
+        network.state_mut().help_ctx = NETWORK_HELP;
         network.state_mut().options.tileable = true;
         let extent = network.state().get_extent();
         let mut info = NetworkInfo {
@@ -405,14 +441,30 @@ impl TuiApp {
             ..Default::default()
         };
         network.insert_child(Box::new(info));
-        Box::new(network)
+        Box::new(NetworkWindow { window: network })
     }
 
     fn status_line(mut bounds: Rect) -> Option<Box<dyn View>> {
         bounds.a.y = bounds.b.y - 1;
         let definitions = StatusDef::list()
+            .def_one_of([NETWORK_HELP], |definition| {
+                definition
+                    .item(
+                        "~Ctrl-N~ Name",
+                        window_key(Key::Char('n'), true, false, false),
+                        RENAME,
+                    )
+                    .item("~F9~ Announce", KeyEvent::from(Key::F(9)), ANNOUNCE)
+                    .item("~Alt-X~ Exit", alt('x'), Command::QUIT)
+                    .item("~F5~ Zoom", KeyEvent::from(Key::F(5)), Command::ZOOM)
+                    .item("~F6~ Next", KeyEvent::from(Key::F(6)), Command::NEXT)
+                    .key_item(window_key(Key::F(5), true, false, false), Command::RESIZE)
+                    .key_item(window_key(Key::F(6), false, true, false), Command::PREV)
+                    .key_item(window_key(Key::F(3), false, false, true), Command::CLOSE)
+            })
             .def_one_of([conversation::HELP], |definition| {
                 definition
+                    .item("~F9~ Announce", KeyEvent::from(Key::F(9)), ANNOUNCE)
                     .item("~Ctrl-A~ Send file", None, files::SEND)
                     .item("~Ctrl-L~ Clear history", None, conversation::CLEAR_HISTORY)
                     .item("~Alt-X~ Exit", alt('x'), Command::QUIT)
@@ -424,6 +476,7 @@ impl TuiApp {
             })
             .def_one_of([browser::HELP], |definition| {
                 definition
+                    .item("~F9~ Announce", KeyEvent::from(Key::F(9)), ANNOUNCE)
                     // Arrows are handled by the page, preserving input cursor movement.
                     .item("~Left~ Back", None, browser::BACK)
                     .item("~Right~ Forward", None, browser::FORWARD)
@@ -438,6 +491,7 @@ impl TuiApp {
             })
             .def_all(|definition| {
                 definition
+                    .item("~F9~ Announce", KeyEvent::from(Key::F(9)), ANNOUNCE)
                     .item("~Alt-X~ Exit", alt('x'), Command::QUIT)
                     .item("~F5~ Zoom", KeyEvent::from(Key::F(5)), Command::ZOOM)
                     .item("~F6~ Next", KeyEvent::from(Key::F(6)), Command::NEXT)
@@ -563,6 +617,24 @@ impl TuiApp {
         }
         let mut offered_files = std::collections::HashSet::new();
         self.program.run_app(move |program, command| {
+            if command == ANNOUNCE || command == RENAME {
+                let name = if command == RENAME {
+                    let initial = state.borrow().announce_name.clone();
+                    let (result, name) =
+                        program.input_box("Announce name", "~N~ame", &initial, 128);
+                    if result != Command::OK {
+                        return;
+                    }
+                    Some(name)
+                } else {
+                    None
+                };
+                state.borrow_mut().announce_status = "Announcing…".into();
+                if commands.send(UiCommand::Announce { name }).is_err() {
+                    state.borrow_mut().announce_status = "Announce failed: service stopped".into();
+                }
+                return;
+            }
             if command == files::REVIEW {
                 let offers = state.borrow().file_offers.clone();
                 offered_files.retain(|id| offers.iter().any(|offer| &offer.id == id));
@@ -864,6 +936,12 @@ async fn snapshot(service: &AppService) -> UiState {
     let conversations = service.conversations().unwrap_or_default();
     let directory = service.directory().unwrap_or_default();
     UiState {
+        announce_name: service
+            .identity_settings()
+            .await
+            .map(|s| s.name)
+            .unwrap_or_default(),
+        network_interfaces: network.interfaces.clone(),
         network: network_lines(network),
         conversations: conversation_rows(service, conversations),
         directory: directory_lines(directory),
@@ -920,24 +998,171 @@ fn rrc_message_line(message: RrcMessageView) -> String {
 }
 
 fn network_lines(network: NetworkSnapshot) -> Vec<String> {
-    let mut lines = vec![
+    vec![
         format!("State: {:?}", network.state),
         network.detail,
         format!(
             "Destination: {}",
             network.destination_hash.as_deref().unwrap_or("-")
         ),
-    ];
-    lines.extend(network.interfaces.into_iter().map(|interface| {
-        format!(
-            "{}  {}  RX {}  TX {}",
-            if interface.online { "+" } else { "-" },
-            interface.name,
-            interface.rx_bytes,
-            interface.tx_bytes
-        )
+    ]
+}
+
+fn update_network(state: &mut UiState, network: NetworkSnapshot) {
+    state.network_interfaces = network.interfaces.clone();
+    state.network = network_lines(network);
+}
+
+fn network_text(state: &UiState, width: usize) -> String {
+    use unicode_segmentation::UnicodeSegmentation;
+    use unicode_width::UnicodeWidthStr;
+    fn clipped(text: &str, width: usize) -> String {
+        let mut used = 0;
+        text.graphemes(true)
+            .take_while(|s| {
+                used += s.width();
+                used <= width
+            })
+            .collect()
+    }
+    let counters: Vec<_> = state
+        .network_interfaces
+        .iter()
+        .map(|i| {
+            (
+                format!("{:.2} KB", i.rx_bytes as f64 / 1024.0),
+                format!("{:.2} KB", i.tx_bytes as f64 / 1024.0),
+            )
+        })
+        .collect();
+    let rx_width = counters.iter().map(|(rx, _)| rx.len()).max().unwrap_or(0);
+    let tx_width = counters.iter().map(|(_, tx)| tx.len()).max().unwrap_or(0);
+    let mut lines: Vec<_> = state.network.iter().map(|s| clipped(s, width)).collect();
+    if !state.announce_name.is_empty() {
+        lines.push(clipped(&format!("Name: {}", state.announce_name), width));
+    }
+    if !state.announce_status.is_empty() {
+        lines.push(clipped(&state.announce_status, width));
+    }
+    for (interface, (rx, tx)) in state.network_interfaces.iter().zip(counters) {
+        let counts = format!("RX {rx:>rx_width$}  TX {tx:>tx_width$}");
+        let name_width = width.saturating_sub(counts.len() + 1);
+        let name = clipped(
+            &format!(
+                "{} {}",
+                if interface.online { "+" } else { "-" },
+                interface.name
+            ),
+            name_width,
+        );
+        let padding = width.saturating_sub(name.width() + counts.len());
+        lines.push(clipped(
+            &format!("{name}{}{counts}", " ".repeat(padding)),
+            width,
+        ));
+    }
+    lines.join("\n")
+}
+
+#[cfg(test)]
+#[test]
+fn network_status_and_global_announce_shortcuts() {
+    let (backend, screen) = tv::HeadlessBackend::new(100, 30);
+    let (_sender, updates) = update_channel();
+    let shared = Rc::new(RefCell::new(UiState {
+        announce_name: "Old".into(),
+        ..Default::default()
     }));
-    lines
+    let mut app = TuiApp::new(Box::new(backend), shared.clone(), updates);
+    let (commands, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    screen.push_key(
+        Key::Char('2'),
+        KeyModifiers {
+            alt: true,
+            ..Default::default()
+        },
+    );
+    for _ in 0..20 {
+        app.program.pump_once();
+    }
+    assert!(screen.snapshot().contains("Ctrl-N"));
+    assert!(screen.snapshot().contains("F9"));
+    screen.push_key(Key::F(9), KeyModifiers::default());
+    screen.push_key(
+        Key::Char('3'),
+        KeyModifiers {
+            alt: true,
+            ..Default::default()
+        },
+    );
+    screen.push_key(Key::F(9), KeyModifiers::default());
+    screen.push_key(
+        Key::Char('x'),
+        KeyModifiers {
+            alt: true,
+            ..Default::default()
+        },
+    );
+    app.run(shared, commands);
+    assert!(matches!(
+        receiver.try_recv(),
+        Ok(UiCommand::Announce { name: None })
+    ));
+    assert!(matches!(
+        receiver.try_recv(),
+        Ok(UiCommand::Announce { name: None })
+    ));
+}
+
+#[cfg(test)]
+#[test]
+fn network_counters_align_to_right_edge_after_resize() {
+    use rsnomadnet_core::models::InterfaceSnapshot;
+    use unicode_width::UnicodeWidthStr;
+    let interface = |name: &str, rx_bytes, tx_bytes| InterfaceSnapshot {
+        id: 1,
+        name: name.into(),
+        online: true,
+        mode: String::new(),
+        role: String::new(),
+        bitrate: 0,
+        mtu: 500,
+        rx_bytes,
+        tx_bytes,
+        rx_rate: 0,
+        tx_rate: 0,
+        held_announces: 0,
+        tx_drops: 0,
+    };
+    let state = UiState {
+        network_interfaces: vec![
+            interface("TCP", 1024, 1280),
+            interface("Очень длинное имя 界", 1024000, 0),
+        ],
+        ..Default::default()
+    };
+    for width in [38, 60, 100] {
+        let text = network_text(&state, width);
+        let lines: Vec<_> = text.lines().collect();
+        assert!(lines.iter().all(|line| line.width() == width));
+        assert!(lines[0].contains("1.00 KB"));
+        assert!(lines[0].ends_with("1.25 KB"));
+        assert!(lines[1].contains("1000.00 KB"));
+        for marker in ["RX", "TX"] {
+            let columns: Vec<_> = lines
+                .iter()
+                .map(|line| line[..line.find(marker).unwrap()].width())
+                .collect();
+            assert_eq!(columns[0], columns[1]);
+        }
+    }
+    for width in 0..38 {
+        assert!(
+            network_text(&state, width)
+                .lines()
+                .all(|line| line.width() <= width)
+        );
+    }
 }
 
 fn directory_lines(entries: Vec<DirectoryEntry>) -> Vec<DirectoryRow> {

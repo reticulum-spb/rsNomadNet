@@ -2,6 +2,7 @@ use super::*;
 use std::collections::HashSet;
 
 enum Completion {
+    Announced(String, Result<(), String>),
     File,
     Sent(String, String, Result<(), String>),
     Hub(String, u64, Result<RrcHubView, String>),
@@ -75,13 +76,13 @@ pub(super) async fn run(
                 }
             }
             _ = refresh.tick() => {
-                state.network = network_lines(service.network_snapshot().await);
+                update_network(&mut state, service.network_snapshot().await);
                 dirty = true;
             }
             event = events.recv() => {
                 match event {
                     Ok(ServerEvent::Snapshot(network) | ServerEvent::NetworkChanged(network)) => {
-                        state.network = network_lines(network);
+                        update_network(&mut state, network);
                     }
                     Ok(ServerEvent::DirectoryChanged(_)) => {
                         match service.directory() {
@@ -123,6 +124,11 @@ pub(super) async fn run(
             }
             completed = jobs.join_next(), if !jobs.is_empty() => {
                 match completed {
+                    Some(Ok(Completion::Announced(name, result))) => {
+                        in_flight.remove("announce");
+                        state.announce_name = name;
+                        state.announce_status = match result { Ok(()) => "Announce sent".into(), Err(e) => format!("Announce failed: {e}") };
+                    }
                     Some(Ok(Completion::File)) => {}
                     Some(Ok(Completion::Sent(destination, content, result))) => {
                         in_flight.remove(&format!("send:{destination}"));
@@ -156,6 +162,25 @@ pub(super) async fn run(
             command = commands.recv() => {
                 let Some(command) = command else { break };
                 dirty = true;
+                if let UiCommand::Announce { name } = command {
+                    if in_flight.contains("announce") {
+                        state.announce_status = "Announce busy; please retry after completion".into();
+                        continue;
+                    }
+                    if jobs.len() >= 16 { state.announce_status = "Announce failed: too many pending operations".into(); continue; }
+                    in_flight.insert("announce".into());
+                    state.announce_status = "Announcing…".into();
+                    let service = service.clone();
+                    jobs.spawn(async move {
+                        let result = async {
+                            let name = match name { Some(name) => name, None => service.identity_settings().await?.name };
+                            service.update_identity(name, true).await.map(|_| ())
+                        }.await.map_err(|e| e.to_string());
+                        let name = service.identity_settings().await.map(|s| s.name).unwrap_or_default();
+                        Completion::Announced(name, result)
+                    });
+                    continue;
+                }
                 if let UiCommand::SendFile { destination_hash, path, reply } = command {
                     if jobs.len() >= 16 { let _ = reply.send(Err("Too many pending transfers".into())); }
                     else {
@@ -230,7 +255,7 @@ pub(super) async fn run(
                 let (key, destination) = match &command {
                     UiCommand::SendMessage { destination_hash, .. } => (format!("send:{destination_hash}"), destination_hash),
                     UiCommand::ConnectRrc { destination_hash } => (format!("rrc:{destination_hash}"), destination_hash),
-                    UiCommand::BrowserFetch(_) | UiCommand::ClearConversation { .. } | UiCommand::SendFile { .. } | UiCommand::DecideFile { .. } => unreachable!(),
+                    UiCommand::Announce { .. } | UiCommand::BrowserFetch(_) | UiCommand::ClearConversation { .. } | UiCommand::SendFile { .. } | UiCommand::DecideFile { .. } => unreachable!(),
                     UiCommand::OpenConversation { .. } | UiCommand::CloseConversation { .. } | UiCommand::LoadOlder { .. } => unreachable!(),
                 };
                 if let UiCommand::ConnectRrc { .. } = &command {
@@ -271,7 +296,7 @@ pub(super) async fn run(
                             Completion::Hub(destination_hash, version, result)
                         });
                     }
-                    UiCommand::BrowserFetch(_) | UiCommand::ClearConversation { .. } | UiCommand::SendFile { .. } | UiCommand::DecideFile { .. } => unreachable!(),
+                    UiCommand::Announce { .. } | UiCommand::BrowserFetch(_) | UiCommand::ClearConversation { .. } | UiCommand::SendFile { .. } | UiCommand::DecideFile { .. } => unreachable!(),
                     UiCommand::OpenConversation { .. } | UiCommand::CloseConversation { .. } | UiCommand::LoadOlder { .. } => unreachable!(),
                 }
             }
@@ -388,6 +413,72 @@ mod tests {
         .await;
         assert!(core.database.messages(&target).unwrap().is_empty());
         assert_eq!(core.database.messages(&other).unwrap().len(), 1);
+        drop(commands);
+        tokio::time::timeout(Duration::from_secs(2), bridge)
+            .await
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn renamed_identity_is_persisted_and_announced() {
+        let (_directory, core, service) = service();
+        core.network.write().await.state = NetworkState::Online;
+        let mut network_commands = core.network_command_rx.lock().await.take().unwrap();
+        let (sender, updates) = update_channel();
+        let (commands, receiver) = tokio::sync::mpsc::unbounded_channel();
+        let bridge = tokio::spawn(run(
+            service,
+            UiState::default(),
+            sender,
+            receiver,
+            core.events.subscribe(),
+        ));
+        commands
+            .send(UiCommand::Announce {
+                name: Some(" New name ".into()),
+            })
+            .unwrap();
+        let request = tokio::time::timeout(Duration::from_secs(2), network_commands.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let NetworkCommand::SetAnnounceName {
+            name,
+            announce_now,
+            response,
+        } = request
+        else {
+            panic!("wrong network command")
+        };
+        assert_eq!(name.as_deref(), Some("New name"));
+        assert!(announce_now);
+        assert_eq!(
+            core.database.setting("announce_name").unwrap().as_deref(),
+            Some("New name")
+        );
+        response.send(Ok(())).unwrap();
+        next_matching(&updates, |s| {
+            s.announce_name == "New name" && s.announce_status == "Announce sent"
+        })
+        .await;
+        commands.send(UiCommand::Announce { name: None }).unwrap();
+        let request = tokio::time::timeout(Duration::from_secs(2), network_commands.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let NetworkCommand::SetAnnounceName {
+            name,
+            announce_now,
+            response,
+        } = request
+        else {
+            panic!("wrong network command")
+        };
+        assert_eq!(name.as_deref(), Some("New name"));
+        assert!(announce_now);
+        response.send(Err("test failure".into())).unwrap();
+        next_matching(&updates, |s| s.announce_status.contains("test failure")).await;
         drop(commands);
         tokio::time::timeout(Duration::from_secs(2), bridge)
             .await
