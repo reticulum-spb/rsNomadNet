@@ -1342,7 +1342,8 @@ fn delivery_proof(
         destination_hash,
         context: rns_wire::context::PacketContext::None,
     }
-    .pack();
+    .pack()
+    .ok()?;
     proof.extend_from_slice(&signature);
     Some(proof)
 }
